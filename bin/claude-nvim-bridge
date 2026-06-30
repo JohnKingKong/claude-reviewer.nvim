@@ -53,17 +53,21 @@ STATUS_FILE=$(mktemp)
 if [ -n "$SOCKET" ] && [ -S "$SOCKET" ]; then
   nvim --server "$SOCKET" --remote-expr "luaeval(\"require('claude-reviewer').start_review('$FILE_PATH', '$NEW_CONTENT_FILE', '$STATUS_FILE')\")" >/dev/null 2>&1
 else
-  # No running Neovim — open a standalone diff in a new tmux window
-  APPROVE_KEY="<leader>ca"
-  DENY_KEY="<leader>cd"
-  NVIM_CMD="nvim -d '$FILE_PATH' '$NEW_CONTENT_FILE' \
-    --cmd \"nnoremap <leader>ca :call writefile(['0'], '$STATUS_FILE') \| qa!<CR>\" \
-    --cmd \"nnoremap <leader>cd :call writefile(['2'], '$STATUS_FILE') \| qa!<CR>\" \
-    --cmd \"echo 'Claude Review: <leader>ca approve  <leader>cd deny'\""
-  if [ -n "$TMUX" ]; then
-    tmux new-window "$NVIM_CMD"
+  # No running Neovim — write a temp launch script and open it in a new terminal window
+  LAUNCH_SCRIPT=$(mktemp /tmp/nvim-review-XXXXXX.sh)
+  cat > "$LAUNCH_SCRIPT" << EOF
+#!/bin/bash
+nvim -d "${FILE_PATH}" "${NEW_CONTENT_FILE}" --cmd "nnoremap <leader>ca :call writefile(['0'], '${STATUS_FILE}') | qa!<CR>" --cmd "nnoremap <leader>cd :call writefile(['2'], '${STATUS_FILE}') | qa!<CR>" --cmd "echo 'Claude Review: <leader>ca approve  <leader>cd deny'"
+rm -f "${LAUNCH_SCRIPT}"
+EOF
+  chmod +x "$LAUNCH_SCRIPT"
+
+  if [ -n "$TMUX" ] || [ -n "$CMUX_WINDOW_ID" ]; then
+    tmux new-window bash "$LAUNCH_SCRIPT"
   else
-    open -a Terminal "$NVIM_CMD"
+    osascript \
+      -e "tell application \"Terminal\" to do script \"bash $LAUNCH_SCRIPT\"" \
+      -e "tell application \"Terminal\" to activate"
   fi
 fi
 
