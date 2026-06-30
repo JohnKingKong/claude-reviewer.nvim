@@ -1,0 +1,50 @@
+#!/bin/bash
+# bin/claude-nvim-bridge
+
+# 1. Read the JSON payload from Claude Code via stdin
+PAYLOAD=$(cat)
+
+# 2. Safely extract the tool name and file path using Python
+TOOL_NAME=$(echo "$PAYLOAD" | python3 -c "import sys, json; print(json.load(sys.stdin).get('tool_name', ''))")
+FILE_PATH=$(echo "$PAYLOAD" | python3 -c "import sys, json; print(json.load(sys.stdin).get('tool_input', {}).get('file_path', ''))")
+
+# If it's not Edit or Write, allow it to continue normally
+if [[ "$TOOL_NAME" != "Edit" && "$TOOL_NAME" != "Write" ]]; then
+  exit 0
+fi
+
+# 3. Ensure we have an active Neovim RPC socket
+if [ -z "$NVIM_LISTEN_ADDRESS" ] && [ -z "$NVIM" ]; then
+  echo "Blocked: No Neovim instance found. Ensure NVIM_LISTEN_ADDRESS or NVIM is set." >&2
+  exit 2
+fi
+
+SOCKET="${NVIM_LISTEN_ADDRESS:-$NVIM}"
+
+# 4. Extract Claude's proposed code into a temporary file
+NEW_CONTENT_FILE=$(mktemp)
+echo "$PAYLOAD" | python3 -c "import sys, json; print(json.load(sys.stdin).get('tool_input', {}).get('new_string', ''))" >"$NEW_CONTENT_FILE"
+
+# 5. Create a temporary status file for Neovim to write its decision to
+STATUS_FILE=$(mktemp)
+
+# 6. Trigger the Lua function inside the running Neovim instance via RPC
+nvim --server "$SOCKET" --remote-expr "luaeval(\"require('claude-reviewer').start_review('$FILE_PATH', '$NEW_CONTENT_FILE', '$STATUS_FILE')\")" >/dev/null
+
+# 7. Pause Claude Code by waiting for Neovim to write to the status file
+while [ ! -s "$STATUS_FILE" ]; do
+  sleep 0.5
+done
+
+RESULT=$(cat "$STATUS_FILE")
+
+# 8. Cleanup temp files
+rm -f "$NEW_CONTENT_FILE" "$STATUS_FILE"
+
+# 9. Exit based on the user's decision in Neovim
+if [ "$RESULT" = "2" ]; then
+  echo "Blocked: Edit rejected by user in Neovim." >&2
+  exit 2
+fi
+
+exit 0

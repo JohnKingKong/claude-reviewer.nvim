@@ -22,15 +22,18 @@ Running Claude Code externally in a dedicated tmux or CMUX tab prevents this con
 
 Install the plugin using **lazy.nvim**. The plugin will automatically configure everything else out-of-the-box on launch.
 
+Create a "claude-reviewer" file in your Neovim plugin directory (usually `~/.config/nvim/lua/plugins.lua`).
+
 ```lua
+-- ~/.config/nvim/lua/plugins/claude-reviewer.lua
 return {
   {
-    "your-github-username/claude-reviewer.nvim",
+    "johnkingkong/claude-reviewer.nvim",
     config = function()
       require("claude-reviewer").setup({
         keymaps = {
-          approve = "<leader>ca", -- Approve the edit
-          deny = "<leader>cd",    -- Reject and block the edit
+          approve = "<leader>ca",
+          deny = "<leader>cd",
         }
       })
     end,

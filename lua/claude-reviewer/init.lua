@@ -11,12 +11,11 @@ function M.setup(opts)
 	M.config = vim.tbl_deep_extend("force", M.config, opts or {})
 
 	-- 1. Dynamically find the absolute path of the bridge script inside the plugin folder
-	local source = debug.getinfo(1).source:sub(2)
-	local plugin_root = source:match("(.*)/lua/claude-reviewer/init%.lua")
-	if not plugin_root then
+	local source = debug.getinfo(1, "S").source:sub(2)
+	local plugin_root = vim.fn.fnamemodify(source, ":h:h:h")
+	if not plugin_root or plugin_root == "" then
 		return
 	end
-
 	local bridge_path = plugin_root .. "/bin/claude-nvim-bridge"
 
 	-- 2. Make sure the bridge script is executable
