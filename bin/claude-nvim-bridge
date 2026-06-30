@@ -35,6 +35,10 @@ if [ -z "$SOCKET" ]; then
   fi
 fi
 
+# No Neovim for this workspace — let Claude Code show its own permission UI
+if [ -z "$SOCKET" ] || [ ! -S "$SOCKET" ]; then
+  exit 0
+fi
 
 # 4. Extract Claude's proposed code into a temporary file
 NEW_CONTENT_FILE=$(mktemp)
@@ -43,40 +47,20 @@ echo "$PAYLOAD" | python3 -c "import sys, json; print(json.load(sys.stdin).get('
 # 5. Create a temporary status file for Neovim to write its decision to
 STATUS_FILE=$(mktemp)
 
-# 6. Send to running Neovim via RPC, or spawn a standalone reviewer if none is found
-if [ -n "$SOCKET" ] && [ -S "$SOCKET" ]; then
-  nvim --server "$SOCKET" --remote-expr "luaeval(\"require('claude-reviewer').start_review('$FILE_PATH', '$NEW_CONTENT_FILE', '$STATUS_FILE')\")" >/dev/null 2>&1
-else
-  # No running Neovim — show diff inline and prompt y/n in the terminal
-  {
-    echo ""
-    echo "Claude wants to edit: $FILE_PATH"
-    echo "────────────────────────────────────────"
-    if [ -f "$FILE_PATH" ]; then
-      if command -v delta >/dev/null 2>&1; then
-        diff -u "$FILE_PATH" "$NEW_CONTENT_FILE" | delta
-      else
-        diff --color=always -u "$FILE_PATH" "$NEW_CONTENT_FILE"
-      fi
-    else
-      cat "$NEW_CONTENT_FILE"
-    fi
-    echo "────────────────────────────────────────"
-  } >/dev/tty 2>&1
+# 6. Send to running Neovim via RPC
+nvim --server "$SOCKET" --remote-expr "luaeval(\"require('claude-reviewer').start_review('$FILE_PATH', '$NEW_CONTENT_FILE', '$STATUS_FILE')\")" >/dev/null 2>&1
 
-  printf "Approve this edit? [y/N] " >/dev/tty
-  read -r ANSWER </dev/tty
-
-  if [[ "$ANSWER" =~ ^[Yy]$ ]]; then
-    echo "0" >"$STATUS_FILE"
-  else
-    echo "2" >"$STATUS_FILE"
-  fi
-fi
-
-# 7. Wait indefinitely for the user to approve or deny in Neovim
+# 7. Wait for the user to approve or deny in Neovim (timeout after 5 minutes)
+TIMEOUT=300
+ELAPSED=0
 while [ ! -s "$STATUS_FILE" ]; do
   sleep 0.5
+  ELAPSED=$((ELAPSED + 1))
+  if [ "$ELAPSED" -ge "$((TIMEOUT * 2))" ]; then
+    rm -f "$NEW_CONTENT_FILE" "$STATUS_FILE"
+    echo '{"hookSpecificOutput": {"hookEventName": "PermissionRequest", "decision": {"behavior": "deny", "message": "Review timed out."}}}'
+    exit 2
+  fi
 done
 
 RESULT=$(cat "$STATUS_FILE")
@@ -92,5 +76,3 @@ else
   echo '{"hookSpecificOutput": {"hookEventName": "PermissionRequest", "decision": {"behavior": "allow"}}}'
   exit 0
 fi
-
-exit 0

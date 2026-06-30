@@ -24,24 +24,17 @@ local function write_socket_file_at(path)
 end
 
 local function write_socket_file()
-	write_socket_file_at(cwd_socket_path(vim.fn.getcwd()))
-end
+	local cwd = vim.fn.getcwd()
+	write_socket_file_at(cwd_socket_path(cwd))
 
-local function write_git_root_socket_file()
-	local bufpath = vim.api.nvim_buf_get_name(0)
-	if bufpath == "" then
-		return
+	-- Also register under the git root in case nvim was started in a subdirectory
+	local result = vim.fn.system({ "git", "-C", cwd, "rev-parse", "--show-toplevel" })
+	if vim.v.shell_error == 0 then
+		local git_root = vim.trim(result)
+		if git_root ~= cwd then
+			write_socket_file_at(cwd_socket_path(git_root))
+		end
 	end
-	local dir = vim.fn.fnamemodify(bufpath, ":h")
-	local result = vim.fn.system({ "git", "-C", dir, "rev-parse", "--show-toplevel" })
-	if vim.v.shell_error ~= 0 then
-		return
-	end
-	local root = vim.trim(result)
-	if root == vim.fn.getcwd() then
-		return
-	end
-	write_socket_file_at(cwd_socket_path(root))
 end
 
 local function cleanup_socket_files()
@@ -65,11 +58,6 @@ function M.setup(opts)
 	-- Keep cwd socket fresh if the user changes directory inside Neovim
 	vim.api.nvim_create_autocmd("DirChanged", {
 		callback = write_socket_file,
-	})
-
-	-- Write a git-root socket file whenever a buffer is entered
-	vim.api.nvim_create_autocmd("BufEnter", {
-		callback = write_git_root_socket_file,
 	})
 
 	-- Clean up all socket files this instance wrote on exit
