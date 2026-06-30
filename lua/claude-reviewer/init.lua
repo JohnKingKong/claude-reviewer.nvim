@@ -7,54 +7,26 @@ M.config = {
 	},
 }
 
+local written_files = {}
+
 local function cwd_socket_path(cwd)
 	local hash = vim.fn.sha256(cwd):sub(1, 8)
 	return string.format("/tmp/claude-nvim-cwd-%s.txt", hash)
 end
 
-local function write_socket_file()
-	local cwd = vim.fn.getcwd()
-
-	-- Primary: cwd-scoped socket so the bridge finds the right workspace
-	local cwd_file = io.open(cwd_socket_path(cwd), "w")
-	if cwd_file then
-		cwd_file:write(vim.v.servername)
-		cwd_file:close()
-	end
-
-	-- Fallback: CMUX/tmux-scoped socket (legacy)
-	local cmux_id = os.getenv("CMUX_WINDOW_ID") or os.getenv("TMUX_PANE") or "default"
-	local legacy_file = io.open(string.format("/tmp/claude-nvim-server-%s.txt", cmux_id), "w")
-	if legacy_file then
-		legacy_file:write(vim.v.servername)
-		legacy_file:close()
-	end
-end
-
-local function remove_cwd_socket_file()
-	local cwd = vim.fn.getcwd()
-	local path = cwd_socket_path(cwd)
-	local f = io.open(path, "r")
+local function write_socket_file_at(path)
+	local f = io.open(path, "w")
 	if f then
-		local content = f:read("*a")
+		f:write(vim.v.servername)
 		f:close()
-		if content == vim.v.servername then
-			os.remove(path)
-		end
+		written_files[path] = true
 	end
 end
 
-local function git_root_for_buf()
-	local bufpath = vim.api.nvim_buf_get_name(0)
-	if bufpath == "" then
-		return nil
-	end
-	local dir = vim.fn.fnamemodify(bufpath, ":h")
-	local result = vim.fn.system({ "git", "-C", dir, "rev-parse", "--show-toplevel" })
-	if vim.v.shell_error ~= 0 then
-		return nil
-	end
-	return vim.trim(result)
+local function write_socket_file()
+	write_socket_file_at(cwd_socket_path(vim.fn.getcwd()))
+	local cmux_id = os.getenv("CMUX_WINDOW_ID") or os.getenv("TMUX_PANE") or "default"
+	write_socket_file_at(string.format("/tmp/claude-nvim-server-%s.txt", cmux_id))
 end
 
 local function write_git_root_socket_file()
@@ -62,33 +34,23 @@ local function write_git_root_socket_file()
 	if bufpath == "" then
 		return
 	end
-	local root = git_root_for_buf() or vim.fn.fnamemodify(bufpath, ":h")
+	local dir = vim.fn.fnamemodify(bufpath, ":h")
+	local result = vim.fn.system({ "git", "-C", dir, "rev-parse", "--show-toplevel" })
+	if vim.v.shell_error ~= 0 then
+		return
+	end
+	local root = vim.trim(result)
 	if root == vim.fn.getcwd() then
 		return
 	end
-	local f = io.open(cwd_socket_path(root), "w")
-	if f then
-		f:write(vim.v.servername)
-		f:close()
-	end
+	write_socket_file_at(cwd_socket_path(root))
 end
 
-local function remove_all_our_socket_files()
-	local handle = io.popen("ls /tmp/claude-nvim-cwd-*.txt 2>/dev/null")
-	if not handle then
-		return
+local function cleanup_socket_files()
+	for path in pairs(written_files) do
+		os.remove(path)
 	end
-	for path in handle:lines() do
-		local f = io.open(path, "r")
-		if f then
-			local content = f:read("*a")
-			f:close()
-			if content == vim.v.servername then
-				os.remove(path)
-			end
-		end
-	end
-	handle:close()
+	written_files = {}
 end
 
 function M.setup(opts)
@@ -114,7 +76,7 @@ function M.setup(opts)
 
 	-- Clean up all socket files this instance wrote on exit
 	vim.api.nvim_create_autocmd("VimLeavePre", {
-		callback = remove_all_our_socket_files,
+		callback = cleanup_socket_files,
 	})
 
 	-- 1. Dynamically find the absolute path of the bridge script inside the plugin folder
