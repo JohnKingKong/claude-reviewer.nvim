@@ -54,23 +54,27 @@ function M.setup(opts)
 		end
 	end
 
+	-- Initialize required JSON structure if empty
 	settings.hooks = settings.hooks or {}
-	settings.hooks.PreToolUse = settings.hooks.PreToolUse or {}
+	-- Change PreToolUse to PermissionRequest
+	settings.hooks.PermissionRequest = settings.hooks.PermissionRequest or {}
 
+	-- Check if the bridge hook is already registered
 	local exists = false
-	for _, item in ipairs(settings.hooks.PreToolUse) do
+	for _, item in ipairs(settings.hooks.PermissionRequest) do
 		if item.hooks then
 			for _, hook in ipairs(item.hooks) do
 				if hook.command and hook.command:match("claude%-nvim%-bridge") then
-					hook.command = bridge_path
+					hook.command = bridge_path -- Always ensure the path is up to date
 					exists = true
 				end
 			end
 		end
 	end
 
+	-- Inject the hook if it is missing
 	if not exists then
-		table.insert(settings.hooks.PreToolUse, {
+		table.insert(settings.hooks.PermissionRequest, {
 			matcher = "Edit|Write",
 			hooks = {
 				{
