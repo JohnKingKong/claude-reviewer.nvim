@@ -35,8 +35,6 @@ if [ ! -S "$SOCKET" ]; then
   exit 2
 fi
 
-SOCKET="${NVIM_LISTEN_ADDRESS:-$NVIM}"
-
 # 4. Extract Claude's proposed code into a temporary file
 NEW_CONTENT_FILE=$(mktemp)
 echo "$PAYLOAD" | python3 -c "import sys, json; print(json.load(sys.stdin).get('tool_input', {}).get('new_string', ''))" >"$NEW_CONTENT_FILE"

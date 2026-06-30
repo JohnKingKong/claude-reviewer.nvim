@@ -7,20 +7,25 @@ M.config = {
 	},
 }
 
+local function write_socket_file()
+	local cmux_id = os.getenv("CMUX_WINDOW_ID") or os.getenv("TMUX_PANE") or "default"
+	local filename = string.format("/tmp/claude-nvim-server-%s.txt", cmux_id)
+	local server_file = io.open(filename, "w")
+	if server_file then
+		server_file:write(vim.v.servername)
+		server_file:close()
+	end
+end
+
 function M.setup(opts)
 	M.config = vim.tbl_deep_extend("force", M.config, opts or {})
 
+	-- Write immediately since LazyVim loads plugins dynamically
+	write_socket_file()
+
+	-- Also register autocmd as a fallback safety net
 	vim.api.nvim_create_autocmd("VimEnter", {
-		callback = function()
-			-- Dynamically scope the filename using the current terminal window or pane ID
-			local cmux_id = os.getenv("CMUX_WINDOW_ID") or os.getenv("TMUX_PANE") or "default"
-			local filename = string.format("/tmp/claude-nvim-server-%s.txt", cmux_id)
-			local server_file = io.open(filename, "w")
-			if server_file then
-				server_file:write(vim.v.servername)
-				server_file:close()
-			end
-		end,
+		callback = write_socket_file,
 	})
 
 	-- 1. Dynamically find the absolute path of the bridge script inside the plugin folder
@@ -49,24 +54,21 @@ function M.setup(opts)
 		end
 	end
 
-	-- Initialize required JSON structure if empty
 	settings.hooks = settings.hooks or {}
 	settings.hooks.PreToolUse = settings.hooks.PreToolUse or {}
 
-	-- Check if the bridge hook is already registered
 	local exists = false
 	for _, item in ipairs(settings.hooks.PreToolUse) do
 		if item.hooks then
 			for _, hook in ipairs(item.hooks) do
 				if hook.command and hook.command:match("claude%-nvim%-bridge") then
-					hook.command = bridge_path -- Always ensure the path is up to date
+					hook.command = bridge_path
 					exists = true
 				end
 			end
 		end
 	end
 
-	-- Inject the hook if it is missing
 	if not exists then
 		table.insert(settings.hooks.PreToolUse, {
 			matcher = "Edit|Write",
@@ -79,7 +81,6 @@ function M.setup(opts)
 		})
 	end
 
-	-- Write the modified configuration back to disk
 	vim.fn.mkdir(vim.fn.expand("~/.claude"), "p")
 	local f = io.open(settings_path, "w")
 	if f then
