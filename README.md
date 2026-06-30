@@ -1,28 +1,36 @@
 # claude-reviewer.nvim
 
-A lightweight, zero-dependency Neovim plugin that intercepts standalone **Claude Code** file modifications from external terminal panes (like tmux, CMUX, or Alacritty) and forces a native side-by-side Neovim diff review *before* any changes are written to your disk.
+A lightweight Neovim plugin that intercepts **Claude Code** file edits and forces a native side-by-side diff review in Neovim *before* any changes are written to disk.
 
 ## Why this exists
 
-If you run Claude Code inside a Neovim terminal toggle pane, accidentally closing Neovim (like spamming `:q`) kills the parent process, completely destroying your AI chat history and context.
+Running Claude Code inside a Neovim terminal toggle means accidentally closing Neovim (`:q` spam) kills the Claude process and destroys your entire session context.
 
-Running Claude Code externally in a dedicated tmux or CMUX tab prevents this context loss, but you lose the safe visual diff review—Claude writes directly to disk. **`claude-reviewer.nvim` bridges this gap.** It uses Claude Code's global lifecycle hooks and Neovim's RPC architecture to pipe external edits back into your live editor session for explicit approval.
+Running Claude Code in a separate terminal (tmux, CMUX, Alacritty) protects your session — but you lose visual diff review and Claude writes directly to disk.
+
+**`claude-reviewer.nvim` bridges this gap.** It hooks into Claude Code's permission system and pipes every proposed file edit back into your live Neovim session for explicit approval, with no external dependencies.
 
 ---
 
-## Features
+## How it works
 
-* **Zero-Configuration Setup:** Automatically configures Claude's global `settings.json` hooks and permissions on startup.
-* **Context Protection:** Keep your Claude terminal in a separate pane. Close or crash Neovim completely without losing your AI chat state.
-* **Native Engine:** Review code side-by-side inside your exact editor environment with **zero external dependencies** required.
+1. Claude Code fires a `PermissionRequest` hook before every `Edit` or `Write`
+2. The hook script (`claude-nvim-bridge`) finds your Neovim instance for the current workspace via a socket file
+3. Neovim opens the diff in a new tab — side by side, using its native diff engine
+4. You approve with `<leader>ca` or deny with `<leader>cd`
+5. Claude Code receives the decision and proceeds (or stops)
+
+**If no Neovim is open for the workspace**, the bridge exits cleanly and Claude Code falls back to its own built-in permission UI — no hanging, no auto-deny.
+
+**If you accept or deny in Claude Code's UI while the diff is open in Neovim**, the diff closes automatically.
 
 ---
 
 ## Installation
 
-Choose the installation snippet that matches your preferred Neovim package manager. The plugin automatically handles permissions and injects the necessary hooks into Claude's global configuration on launch.
+> **Important:** Use `lazy = false`. The plugin must load at startup to register its workspace socket. If lazy-loaded, Neovim won't be found when Claude fires its first hook.
 
-### 1. Using lazy.nvim
+### lazy.nvim
 
 ```lua
 return {
@@ -32,8 +40,8 @@ return {
     config = function()
       require("claude-reviewer").setup({
         keymaps = {
-          approve = "<leader>ca", -- Approve the edit
-          deny = "<leader>cd",    -- Reject and block the edit
+          approve = "<leader>ca",
+          deny = "<leader>cd",
         }
       })
     end,
@@ -41,17 +49,17 @@ return {
 }
 ```
 
-### 2. Using vim-plug
+### vim-plug
 
 ```vim
-" In your init.vim or inside a lua << EOF block
 Plug 'johnkingkong/claude-reviewer.nvim'
-
-" Call the setup function in your Lua initialization
-lua require('claude-reviewer').setup()
 ```
 
-### 3. Using pckr.nvim
+```lua
+require('claude-reviewer').setup()
+```
+
+### pckr.nvim
 
 ```lua
 require('pckr').add({
@@ -64,40 +72,45 @@ require('pckr').add({
 })
 ```
 
-### 4. Using mini.deps
+### mini.deps
 
 ```lua
 local MiniDeps = require('mini.deps')
-
-MiniDeps.add({
-  source = 'johnkingkong/claude-reviewer.nvim',
-})
-
+MiniDeps.add({ source = 'johnkingkong/claude-reviewer.nvim' })
 require('claude-reviewer').setup()
 ```
 
 ---
 
-## Configuration Options
-
-You can pass an optional table to the `setup()` function to customize your keymaps:
+## Configuration
 
 ```lua
 require('claude-reviewer').setup({
   keymaps = {
-    approve = "<leader>ca", -- Keymap to accept changes and let Claude proceed
-    deny = "<leader>cd",    -- Keymap to abort changes and block Claude
+    approve = "<leader>ca", -- accept the edit and let Claude proceed
+    deny = "<leader>cd",    -- reject the edit and block Claude
   }
 })
 ```
 
 ---
 
-## Environment Requirements
+## Architecture
 
-Because your terminal and Neovim instances are completely separated, they communicate over a fixed RPC Unix socket loopback file created automatically at `/tmp/nvim-claude-bridge.pipe`.
+The plugin has two components:
 
-No manually exported environment variables are required; as long as Neovim is running on your machine, external Claude processes running in separate splits or tmux windows will connect seamlessly out-of-the-box.
+**`bin/claude-nvim-bridge`** — a bash script registered as a Claude Code `PermissionRequest` hook. On every `Edit`/`Write`:
+- Looks up the workspace's Neovim socket from `/tmp/claude-nvim-cwd-<hash>.txt`
+- If found, sends an RPC to Neovim and waits for the decision (5-minute timeout)
+- If not found, exits 0 so Claude Code shows its own UI
+- Creates an "alive" sentinel file that Neovim polls; removing it on exit signals Neovim to close any open diff
+
+**`lua/claude-reviewer/init.lua`** — the Neovim plugin:
+- Writes a workspace socket file at startup (keyed by cwd hash and git root)
+- Cleans up its socket files on exit
+- Exposes `start_review()` as an RPC entry point that opens the diff tab, sets up keymaps, and polls for the alive sentinel file
+
+The hook and settings injection into `~/.claude/settings.json` happen automatically on `setup()`.
 
 ---
 
