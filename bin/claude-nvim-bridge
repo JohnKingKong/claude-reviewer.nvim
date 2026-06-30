@@ -7,6 +7,7 @@ PAYLOAD=$(cat)
 # 2. Safely extract the tool name and file path using Python
 TOOL_NAME=$(echo "$PAYLOAD" | python3 -c "import sys, json; print(json.load(sys.stdin).get('tool_name', ''))")
 FILE_PATH=$(echo "$PAYLOAD" | python3 -c "import sys, json; print(json.load(sys.stdin).get('tool_input', {}).get('file_path', ''))")
+FILE_PATH=$(realpath "$FILE_PATH")
 
 # If it's not Edit or Write, allow it to continue normally
 if [[ "$TOOL_NAME" != "Edit" && "$TOOL_NAME" != "Write" ]]; then
@@ -14,8 +15,20 @@ if [[ "$TOOL_NAME" != "Edit" && "$TOOL_NAME" != "Write" ]]; then
 fi
 
 # 3. Ensure we have an active Neovim RPC socket
-if [ -z "$NVIM_LISTEN_ADDRESS" ] && [ -z "$NVIM" ]; then
-  echo "Blocked: No Neovim instance found. Ensure NVIM_LISTEN_ADDRESS or NVIM is set." >&2
+if [ -n "$NVIM_LISTEN_ADDRESS" ]; then
+  SOCKET="$NVIM_LISTEN_ADDRESS"
+elif [ -n "$NVIM" ]; then
+  SOCKET="$NVIM"
+elif [ -f "/tmp/claude-nvim-server.txt" ]; then
+  SOCKET=$(cat /tmp/claude-nvim-server.txt)
+else
+  echo "Blocked: No Neovim instance found. Please open Neovim first." >&2
+  exit 2
+fi
+
+# Verify the socket file actually exists and is active
+if [ ! -S "$SOCKET" ]; then
+  echo "Blocked: Active Neovim socket not found. Ensure Neovim is running." >&2
   exit 2
 fi
 

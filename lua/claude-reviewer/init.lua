@@ -10,6 +10,12 @@ M.config = {
 function M.setup(opts)
 	M.config = vim.tbl_deep_extend("force", M.config, opts or {})
 
+	local server_file = io.open("/tmp/claude-nvim-server.txt", "w")
+	if server_file then
+		server_file:write(vim.v.servername)
+		server_file:close()
+	end
+
 	-- 1. Dynamically find the absolute path of the bridge script inside the plugin folder
 	local source = debug.getinfo(1, "S").source:sub(2)
 	local plugin_root = vim.fn.fnamemodify(source, ":h:h:h")
