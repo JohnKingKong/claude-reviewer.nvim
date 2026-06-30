@@ -57,10 +57,10 @@ rm -f "$NEW_CONTENT_FILE" "$STATUS_FILE"
 
 # 9. Read decision and respond directly to Claude Code's permission engine
 if [ "$RESULT" = "2" ]; then
-  echo '{"decision": "deny", "reason": "Blocked: Edit rejected by user in Neovim."}'
+  echo '{"hookSpecificOutput": {"hookEventName": "PermissionRequest", "decision": {"behavior": "deny", "message": "Edit rejected by user in Neovim."}}}'
   exit 2
 else
-  echo '{"decision": "allow"}'
+  echo '{"hookSpecificOutput": {"hookEventName": "PermissionRequest", "decision": {"behavior": "allow"}}}'
   exit 0
 fi
 
