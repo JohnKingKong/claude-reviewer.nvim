@@ -108,7 +108,8 @@ function M.start_review(target_file, temp_content_file, status_file)
 				f:close()
 			end
 			vim.cmd("windo diffoff")
-			vim.cmd("tabclose")
+			pcall(vim.cmd, "tabclose")
+			pcall(vim.api.nvim_buf_delete, temp_buf, { force = true })
 		end
 
 		vim.keymap.set("n", M.config.keymaps.approve, function()
