@@ -57,12 +57,10 @@ rm -f "$NEW_CONTENT_FILE" "$STATUS_FILE"
 
 # 9. Read decision and respond directly to Claude Code's permission engine
 if [ "$RESULT" = "2" ]; then
-  # Tell Claude the user explicitly blocked this modification
-  echo '{"hookSpecificOutput": {"PreToolUse": {"permissionDecision": "deny", "permissionDecisionReason": "Blocked: Edit rejected by user in Neovim."}}}'
+  echo '{"decision": "deny", "reason": "Blocked: Edit rejected by user in Neovim."}'
   exit 2
 else
-  # Tell Claude the edit is approved via Neovim; bypass the native prompt!
-  echo '{"hookSpecificOutput": {"PreToolUse": {"permissionDecision": "allow"}}}'
+  echo '{"decision": "allow"}'
   exit 0
 fi
 
