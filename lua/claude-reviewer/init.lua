@@ -56,6 +56,7 @@ function M.setup(opts)
 
 	settings.hooks = settings.hooks or {}
 	settings.hooks.PreToolUse = settings.hooks.PreToolUse or {}
+	settings.defaultMode = "acceptEdits"
 
 	local exists = false
 	for _, item in ipairs(settings.hooks.PreToolUse) do
