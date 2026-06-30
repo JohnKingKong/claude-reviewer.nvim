@@ -53,21 +53,30 @@ STATUS_FILE=$(mktemp)
 if [ -n "$SOCKET" ] && [ -S "$SOCKET" ]; then
   nvim --server "$SOCKET" --remote-expr "luaeval(\"require('claude-reviewer').start_review('$FILE_PATH', '$NEW_CONTENT_FILE', '$STATUS_FILE')\")" >/dev/null 2>&1
 else
-  # No running Neovim — write a temp launch script and open it in a new terminal window
-  LAUNCH_SCRIPT=$(mktemp /tmp/nvim-review-XXXXXX.sh)
-  cat > "$LAUNCH_SCRIPT" << EOF
-#!/bin/bash
-nvim -d "${FILE_PATH}" "${NEW_CONTENT_FILE}" --cmd "nnoremap <leader>ca :call writefile(['0'], '${STATUS_FILE}') | qa!<CR>" --cmd "nnoremap <leader>cd :call writefile(['2'], '${STATUS_FILE}') | qa!<CR>" --cmd "echo 'Claude Review: <leader>ca approve  <leader>cd deny'"
-rm -f "${LAUNCH_SCRIPT}"
-EOF
-  chmod +x "$LAUNCH_SCRIPT"
+  # No running Neovim — show diff inline and prompt y/n in the terminal
+  {
+    echo ""
+    echo "Claude wants to edit: $FILE_PATH"
+    echo "────────────────────────────────────────"
+    if [ -f "$FILE_PATH" ]; then
+      if command -v delta >/dev/null 2>&1; then
+        diff -u "$FILE_PATH" "$NEW_CONTENT_FILE" | delta
+      else
+        diff --color=always -u "$FILE_PATH" "$NEW_CONTENT_FILE"
+      fi
+    else
+      cat "$NEW_CONTENT_FILE"
+    fi
+    echo "────────────────────────────────────────"
+  } >/dev/tty 2>&1
 
-  if [ -n "$TMUX" ] || [ -n "$CMUX_WINDOW_ID" ]; then
-    tmux new-window bash "$LAUNCH_SCRIPT"
+  printf "Approve this edit? [y/N] " >/dev/tty
+  read -r ANSWER </dev/tty
+
+  if [[ "$ANSWER" =~ ^[Yy]$ ]]; then
+    echo "0" >"$STATUS_FILE"
   else
-    osascript \
-      -e "tell application \"Terminal\" to do script \"bash $LAUNCH_SCRIPT\"" \
-      -e "tell application \"Terminal\" to activate"
+    echo "2" >"$STATUS_FILE"
   fi
 fi
 
