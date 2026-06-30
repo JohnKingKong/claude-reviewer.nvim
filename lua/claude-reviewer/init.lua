@@ -147,34 +147,55 @@ function M.setup(opts)
 	end
 end
 
-function M.start_review(target_file, temp_content_file, status_file)
+function M.start_review(target_file, temp_content_file, status_file, alive_file)
 	vim.schedule(function()
 		vim.cmd("tabedit " .. target_file)
 		vim.cmd("vsplit " .. temp_content_file)
 		vim.cmd("windo diffthis")
 
 		local temp_buf = vim.api.nvim_get_current_buf()
+		local done = false
 
-		local function finish_review(exit_code)
-			local f = io.open(status_file, "w")
-			if f then
-				f:write(tostring(exit_code))
-				f:close()
+		local function finish_review(exit_code, notify_msg, notify_level)
+			if done then return end
+			done = true
+			if exit_code ~= nil then
+				local f = io.open(status_file, "w")
+				if f then
+					f:write(tostring(exit_code))
+					f:close()
+				end
 			end
 			vim.cmd("windo diffoff")
 			pcall(vim.cmd, "tabclose")
 			pcall(vim.api.nvim_buf_delete, temp_buf, { force = true })
+			if notify_msg then
+				vim.notify(notify_msg, notify_level, { title = "Claude Reviewer" })
+			end
 		end
 
 		vim.keymap.set("n", M.config.keymaps.approve, function()
-			finish_review(0)
-			vim.notify("Claude edit approved!", vim.log.levels.INFO, { title = "Claude Reviewer" })
+			finish_review(0, "Claude edit approved!", vim.log.levels.INFO)
 		end, { buffer = temp_buf, desc = "Approve Claude Edit" })
 
 		vim.keymap.set("n", M.config.keymaps.deny, function()
-			finish_review(2)
-			vim.notify("Claude edit rejected.", vim.log.levels.WARN, { title = "Claude Reviewer" })
+			finish_review(2, "Claude edit rejected.", vim.log.levels.WARN)
 		end, { buffer = temp_buf, desc = "Deny Claude Edit" })
+
+		-- Close the diff if Claude Code decides before the user reviews in nvim
+		local timer = vim.uv.new_timer()
+		timer:start(500, 500, vim.schedule_wrap(function()
+			if done then
+				timer:stop()
+				timer:close()
+				return
+			end
+			if vim.fn.filereadable(alive_file) == 0 then
+				timer:stop()
+				timer:close()
+				finish_review(nil, "Claude review cancelled.", vim.log.levels.WARN)
+			end
+		end))
 
 		vim.notify(
 			string.format("Review pending!\nApprove: %s\nDeny: %s", M.config.keymaps.approve, M.config.keymaps.deny),

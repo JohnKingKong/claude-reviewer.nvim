@@ -44,11 +44,13 @@ fi
 NEW_CONTENT_FILE=$(mktemp)
 echo "$PAYLOAD" | python3 -c "import sys, json; print(json.load(sys.stdin).get('tool_input', {}).get('new_string', ''))" >"$NEW_CONTENT_FILE"
 
-# 5. Create a temporary status file for Neovim to write its decision to
+# 5. Create temp files: status (nvim writes decision) + alive (bridge removes on exit)
 STATUS_FILE=$(mktemp)
+ALIVE_FILE=$(mktemp)
+trap 'rm -f "$ALIVE_FILE" "$NEW_CONTENT_FILE" "$STATUS_FILE"' EXIT
 
 # 6. Send to running Neovim via RPC
-nvim --server "$SOCKET" --remote-expr "luaeval(\"require('claude-reviewer').start_review('$FILE_PATH', '$NEW_CONTENT_FILE', '$STATUS_FILE')\")" >/dev/null 2>&1
+nvim --server "$SOCKET" --remote-expr "luaeval(\"require('claude-reviewer').start_review('$FILE_PATH', '$NEW_CONTENT_FILE', '$STATUS_FILE', '$ALIVE_FILE')\")" >/dev/null 2>&1
 
 # 7. Wait for the user to approve or deny in Neovim (timeout after 5 minutes)
 TIMEOUT=300
@@ -65,10 +67,7 @@ done
 
 RESULT=$(cat "$STATUS_FILE")
 
-# 8. Cleanup temp files
-rm -f "$NEW_CONTENT_FILE" "$STATUS_FILE"
-
-# 9. Read decision and respond directly to Claude Code's permission engine
+# 8. Read decision and respond directly to Claude Code's permission engine
 if [ "$RESULT" = "2" ]; then
   echo '{"hookSpecificOutput": {"hookEventName": "PermissionRequest", "decision": {"behavior": "deny", "message": "Edit rejected by user in Neovim."}}}'
   exit 2
