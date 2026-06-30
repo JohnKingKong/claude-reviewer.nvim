@@ -35,12 +35,6 @@ if [ -z "$SOCKET" ]; then
   fi
 fi
 
-# Priority 3: CMUX/tmux window-scoped file (legacy fallback)
-if [ -z "$SOCKET" ]; then
-  CMUX_ID="${CMUX_WINDOW_ID:-${TMUX_PANE:-default}}"
-  SCOPED_FILE="/tmp/claude-nvim-server-${CMUX_ID}.txt"
-  [ -f "$SCOPED_FILE" ] && SOCKET=$(cat "$SCOPED_FILE")
-fi
 
 # 4. Extract Claude's proposed code into a temporary file
 NEW_CONTENT_FILE=$(mktemp)

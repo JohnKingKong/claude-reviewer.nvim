@@ -25,8 +25,6 @@ end
 
 local function write_socket_file()
 	write_socket_file_at(cwd_socket_path(vim.fn.getcwd()))
-	local cmux_id = os.getenv("CMUX_WINDOW_ID") or os.getenv("TMUX_PANE") or "default"
-	write_socket_file_at(string.format("/tmp/claude-nvim-server-%s.txt", cmux_id))
 end
 
 local function write_git_root_socket_file()
