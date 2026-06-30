@@ -14,25 +14,38 @@ if [[ "$TOOL_NAME" != "Edit" && "$TOOL_NAME" != "Write" ]]; then
   exit 0
 fi
 
-# 3. Ensure we have an active Neovim RPC socket scoped to this specific workspace
-CMUX_ID="${CMUX_WINDOW_ID:-${TMUX_PANE:-default}}"
-SCOPED_FILE="/tmp/claude-nvim-server-${CMUX_ID}.txt"
+# 3. Find the Neovim socket for this specific workspace
 
+SOCKET=""
+
+# Priority 1: Claude is running inside a Neovim terminal — use that instance directly
 if [ -n "$NVIM_LISTEN_ADDRESS" ]; then
   SOCKET="$NVIM_LISTEN_ADDRESS"
 elif [ -n "$NVIM" ]; then
   SOCKET="$NVIM"
-elif [ -f "$SCOPED_FILE" ]; then
-  SOCKET=$(cat "$SCOPED_FILE")
-else
-  echo "Blocked: No Neovim instance found for this CMUX window." >&2
-  exit 2
 fi
 
-# Verify the socket file actually exists and is active
-if [ ! -S "$SOCKET" ]; then
-  echo "Blocked: Active Neovim socket not found for this pane." >&2
-  exit 2
+# Priority 2: Match by cwd — the most reliable cross-workspace strategy
+if [ -z "$SOCKET" ]; then
+  CLAUDE_CWD=$(echo "$PAYLOAD" | python3 -c "import sys, json; print(json.load(sys.stdin).get('cwd', ''))" 2>/dev/null)
+  if [ -n "$CLAUDE_CWD" ]; then
+    CWD_HASH=$(python3 -c "import hashlib, sys; print(hashlib.sha256(sys.argv[1].encode()).hexdigest()[:8])" "$CLAUDE_CWD" 2>/dev/null)
+    CWD_FILE="/tmp/claude-nvim-cwd-${CWD_HASH}.txt"
+    [ -f "$CWD_FILE" ] && SOCKET=$(cat "$CWD_FILE")
+  fi
+fi
+
+# Priority 3: CMUX/tmux window-scoped file (legacy fallback)
+if [ -z "$SOCKET" ]; then
+  CMUX_ID="${CMUX_WINDOW_ID:-${TMUX_PANE:-default}}"
+  SCOPED_FILE="/tmp/claude-nvim-server-${CMUX_ID}.txt"
+  [ -f "$SCOPED_FILE" ] && SOCKET=$(cat "$SCOPED_FILE")
+fi
+
+# No matching Neovim found — allow the edit through without opening a diff
+if [ -z "$SOCKET" ] || [ ! -S "$SOCKET" ]; then
+  echo '{"hookSpecificOutput": {"hookEventName": "PermissionRequest", "decision": {"behavior": "allow"}}}'
+  exit 0
 fi
 
 # 4. Extract Claude's proposed code into a temporary file

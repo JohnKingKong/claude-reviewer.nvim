@@ -7,13 +7,40 @@ M.config = {
 	},
 }
 
+local function cwd_socket_path(cwd)
+	local hash = vim.fn.sha256(cwd):sub(1, 8)
+	return string.format("/tmp/claude-nvim-cwd-%s.txt", hash)
+end
+
 local function write_socket_file()
+	local cwd = vim.fn.getcwd()
+
+	-- Primary: cwd-scoped socket so the bridge finds the right workspace
+	local cwd_file = io.open(cwd_socket_path(cwd), "w")
+	if cwd_file then
+		cwd_file:write(vim.v.servername)
+		cwd_file:close()
+	end
+
+	-- Fallback: CMUX/tmux-scoped socket (legacy)
 	local cmux_id = os.getenv("CMUX_WINDOW_ID") or os.getenv("TMUX_PANE") or "default"
-	local filename = string.format("/tmp/claude-nvim-server-%s.txt", cmux_id)
-	local server_file = io.open(filename, "w")
-	if server_file then
-		server_file:write(vim.v.servername)
-		server_file:close()
+	local legacy_file = io.open(string.format("/tmp/claude-nvim-server-%s.txt", cmux_id), "w")
+	if legacy_file then
+		legacy_file:write(vim.v.servername)
+		legacy_file:close()
+	end
+end
+
+local function remove_cwd_socket_file()
+	local cwd = vim.fn.getcwd()
+	local path = cwd_socket_path(cwd)
+	local f = io.open(path, "r")
+	if f then
+		local content = f:read("*a")
+		f:close()
+		if content == vim.v.servername then
+			os.remove(path)
+		end
 	end
 end
 
@@ -26,6 +53,16 @@ function M.setup(opts)
 	-- Also register autocmd as a fallback safety net
 	vim.api.nvim_create_autocmd("VimEnter", {
 		callback = write_socket_file,
+	})
+
+	-- Keep cwd socket fresh if the user changes directory inside Neovim
+	vim.api.nvim_create_autocmd("DirChanged", {
+		callback = write_socket_file,
+	})
+
+	-- Clean up this instance's cwd socket on exit
+	vim.api.nvim_create_autocmd("VimLeavePre", {
+		callback = remove_cwd_socket_file,
 	})
 
 	-- 1. Dynamically find the absolute path of the bridge script inside the plugin folder
@@ -56,8 +93,25 @@ function M.setup(opts)
 
 	-- Initialize required JSON structure if empty
 	settings.hooks = settings.hooks or {}
-	-- Change PreToolUse to PermissionRequest
 	settings.hooks.PermissionRequest = settings.hooks.PermissionRequest or {}
+
+	-- Remove any stale bridge entries left in PreToolUse from older versions
+	if settings.hooks.PreToolUse then
+		local cleaned = {}
+		for _, item in ipairs(settings.hooks.PreToolUse) do
+			local has_bridge = false
+			for _, hook in ipairs(item.hooks or {}) do
+				if hook.command and hook.command:match("claude%-nvim%-bridge") then
+					has_bridge = true
+					break
+				end
+			end
+			if not has_bridge then
+				table.insert(cleaned, item)
+			end
+		end
+		settings.hooks.PreToolUse = cleaned
+	end
 
 	-- Check if the bridge hook is already registered
 	local exists = false
