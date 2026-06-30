@@ -44,6 +44,53 @@ local function remove_cwd_socket_file()
 	end
 end
 
+local function git_root_for_buf()
+	local bufpath = vim.api.nvim_buf_get_name(0)
+	if bufpath == "" then
+		return nil
+	end
+	local dir = vim.fn.fnamemodify(bufpath, ":h")
+	local result = vim.fn.system({ "git", "-C", dir, "rev-parse", "--show-toplevel" })
+	if vim.v.shell_error ~= 0 then
+		return nil
+	end
+	return vim.trim(result)
+end
+
+local function write_git_root_socket_file()
+	local bufpath = vim.api.nvim_buf_get_name(0)
+	if bufpath == "" then
+		return
+	end
+	local root = git_root_for_buf() or vim.fn.fnamemodify(bufpath, ":h")
+	if root == vim.fn.getcwd() then
+		return
+	end
+	local f = io.open(cwd_socket_path(root), "w")
+	if f then
+		f:write(vim.v.servername)
+		f:close()
+	end
+end
+
+local function remove_all_our_socket_files()
+	local handle = io.popen("ls /tmp/claude-nvim-cwd-*.txt 2>/dev/null")
+	if not handle then
+		return
+	end
+	for path in handle:lines() do
+		local f = io.open(path, "r")
+		if f then
+			local content = f:read("*a")
+			f:close()
+			if content == vim.v.servername then
+				os.remove(path)
+			end
+		end
+	end
+	handle:close()
+end
+
 function M.setup(opts)
 	M.config = vim.tbl_deep_extend("force", M.config, opts or {})
 
@@ -60,9 +107,14 @@ function M.setup(opts)
 		callback = write_socket_file,
 	})
 
-	-- Clean up this instance's cwd socket on exit
+	-- Write a git-root socket file whenever a buffer is entered
+	vim.api.nvim_create_autocmd("BufEnter", {
+		callback = write_git_root_socket_file,
+	})
+
+	-- Clean up all socket files this instance wrote on exit
 	vim.api.nvim_create_autocmd("VimLeavePre", {
-		callback = remove_cwd_socket_file,
+		callback = remove_all_our_socket_files,
 	})
 
 	-- 1. Dynamically find the absolute path of the bridge script inside the plugin folder
