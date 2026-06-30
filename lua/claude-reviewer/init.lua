@@ -12,7 +12,10 @@ function M.setup(opts)
 
 	vim.api.nvim_create_autocmd("VimEnter", {
 		callback = function()
-			local server_file = io.open("/tmp/claude-nvim-server.txt", "w")
+			-- Dynamically scope the filename using the current terminal window or pane ID
+			local cmux_id = os.getenv("CMUX_WINDOW_ID") or os.getenv("TMUX_PANE") or "default"
+			local filename = string.format("/tmp/claude-nvim-server-%s.txt", cmux_id)
+			local server_file = io.open(filename, "w")
 			if server_file then
 				server_file:write(vim.v.servername)
 				server_file:close()

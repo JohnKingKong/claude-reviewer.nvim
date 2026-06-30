@@ -14,21 +14,24 @@ if [[ "$TOOL_NAME" != "Edit" && "$TOOL_NAME" != "Write" ]]; then
   exit 0
 fi
 
-# 3. Ensure we have an active Neovim RPC socket
+# 3. Ensure we have an active Neovim RPC socket scoped to this specific workspace
+CMUX_ID="${CMUX_WINDOW_ID:-${TMUX_PANE:-default}}"
+SCOPED_FILE="/tmp/claude-nvim-server-${CMUX_ID}.txt"
+
 if [ -n "$NVIM_LISTEN_ADDRESS" ]; then
   SOCKET="$NVIM_LISTEN_ADDRESS"
 elif [ -n "$NVIM" ]; then
   SOCKET="$NVIM"
-elif [ -f "/tmp/claude-nvim-server.txt" ]; then
-  SOCKET=$(cat /tmp/claude-nvim-server.txt)
+elif [ -f "$SCOPED_FILE" ]; then
+  SOCKET=$(cat "$SCOPED_FILE")
 else
-  echo "Blocked: No Neovim instance found. Please open Neovim first." >&2
+  echo "Blocked: No Neovim instance found for this CMUX window." >&2
   exit 2
 fi
 
 # Verify the socket file actually exists and is active
 if [ ! -S "$SOCKET" ]; then
-  echo "Blocked: Active Neovim socket not found. Ensure Neovim is running." >&2
+  echo "Blocked: Active Neovim socket not found for this pane." >&2
   exit 2
 fi
 
