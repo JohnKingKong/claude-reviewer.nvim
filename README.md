@@ -28,6 +28,7 @@ Choose the installation snippet that matches your preferred Neovim package manag
 return {
   {
     "johnkingkong/claude-reviewer.nvim",
+    lazy = false,
     config = function()
       require("claude-reviewer").setup({
         keymaps = {
