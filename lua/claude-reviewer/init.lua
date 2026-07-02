@@ -146,7 +146,6 @@ function M.setup(opts)
 		f:close()
 	end
 end
-
 function M.start_review(target_file, temp_content_file, status_file, alive_file)
 	vim.schedule(function()
 		vim.cmd("tabedit " .. target_file)
@@ -157,8 +156,20 @@ function M.start_review(target_file, temp_content_file, status_file, alive_file)
 		local done = false
 
 		local function finish_review(exit_code, notify_msg, notify_level)
-			if done then return end
+			if done then
+				return
+			end
 			done = true
+
+			-- 1. CLEAN UP NVIM LAYOUT FIRST
+			-- We turn off diff mode, drop the tab, and delete the temp buffer
+			-- before Claude wakes up and modifies the target file on disk.
+			vim.cmd("windo diffoff")
+			pcall(vim.cmd, "tabclose")
+			pcall(vim.api.nvim_buf_delete, temp_buf, { force = true })
+
+			-- 2. NOW UNBLOCK CLAUDE
+			-- Once Neovim is safely back in its normal layout, we release the bash loop.
 			if exit_code ~= nil then
 				local f = io.open(status_file, "w")
 				if f then
@@ -166,9 +177,8 @@ function M.start_review(target_file, temp_content_file, status_file, alive_file)
 					f:close()
 				end
 			end
-			vim.cmd("windo diffoff")
-			pcall(vim.cmd, "tabclose")
-			pcall(vim.api.nvim_buf_delete, temp_buf, { force = true })
+
+			-- 3. SEND NOTIFICATION
 			if notify_msg then
 				vim.notify(notify_msg, notify_level, { title = "Claude Reviewer" })
 			end
@@ -184,18 +194,22 @@ function M.start_review(target_file, temp_content_file, status_file, alive_file)
 
 		-- Close the diff if Claude Code decides before the user reviews in nvim
 		local timer = vim.uv.new_timer()
-		timer:start(500, 500, vim.schedule_wrap(function()
-			if done then
-				timer:stop()
-				timer:close()
-				return
-			end
-			if vim.fn.filereadable(alive_file) == 0 then
-				timer:stop()
-				timer:close()
-				finish_review(nil, "Claude review cancelled.", vim.log.levels.WARN)
-			end
-		end))
+		timer:start(
+			500,
+			500,
+			vim.schedule_wrap(function()
+				if done then
+					timer:stop()
+					timer:close()
+					return
+				end
+				if vim.fn.filereadable(alive_file) == 0 then
+					timer:stop()
+					timer:close()
+					finish_review(nil, "Claude review cancelled.", vim.log.levels.WARN)
+				end
+			end)
+		)
 
 		vim.notify(
 			string.format("Review pending!\nApprove: %s\nDeny: %s", M.config.keymaps.approve, M.config.keymaps.deny),
