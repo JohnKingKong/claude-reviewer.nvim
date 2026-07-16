@@ -1,4 +1,4 @@
-# claude-reviewer.nvim
+# **claude-reviewer.nvim**
 
 A lightweight Neovim plugin that intercepts **Claude Code** file edits and forces a native side-by-side diff review in Neovim *before* any changes are written to disk.
 

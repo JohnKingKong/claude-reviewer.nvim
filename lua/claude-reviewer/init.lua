@@ -148,11 +148,16 @@ function M.setup(opts)
 end
 function M.start_review(target_file, temp_content_file, status_file, alive_file)
 	vim.schedule(function()
-		vim.cmd("tabedit " .. target_file)
-		vim.cmd("vsplit " .. temp_content_file)
+		vim.cmd("tabnew")
+		vim.cmd("edit " .. vim.fn.fnameescape(target_file))
+		vim.cmd("vsplit " .. vim.fn.fnameescape(temp_content_file))
 		vim.cmd("windo diffthis")
 
+		local review_tab = vim.api.nvim_get_current_tabpage()
 		local temp_buf = vim.api.nvim_get_current_buf()
+		vim.cmd("wincmd h")
+		local orig_buf = vim.api.nvim_get_current_buf()
+		vim.cmd("wincmd l")
 		local done = false
 
 		local function finish_review(exit_code, notify_msg, notify_level)
@@ -162,11 +167,21 @@ function M.start_review(target_file, temp_content_file, status_file, alive_file)
 			done = true
 
 			-- 1. CLEAN UP NVIM LAYOUT FIRST
-			-- We turn off diff mode, drop the tab, and delete the temp buffer
-			-- before Claude wakes up and modifies the target file on disk.
-			vim.cmd("windo diffoff")
-			pcall(vim.cmd, "tabclose")
-			pcall(vim.api.nvim_buf_delete, temp_buf, { force = true })
+			-- Close the review tab by handle, not "current" tab — the target file
+			-- buffer may be visible in other tabs, causing tabclose to close the
+			-- wrong tab when the keymap fires from outside the review tab.
+			if vim.api.nvim_tabpage_is_valid(review_tab) then
+				local tabnr = vim.api.nvim_tabpage_get_number(review_tab)
+				if #vim.api.nvim_list_tabpages() > 1 then
+					pcall(vim.cmd, tabnr .. "tabclose")
+				else
+					pcall(vim.cmd, "only")
+					vim.cmd("enew")
+				end
+			end
+			if vim.api.nvim_buf_is_valid(temp_buf) then
+				pcall(vim.api.nvim_buf_delete, temp_buf, { force = true })
+			end
 
 			-- 2. NOW UNBLOCK CLAUDE
 			-- Once Neovim is safely back in its normal layout, we release the bash loop.
@@ -182,17 +197,36 @@ function M.start_review(target_file, temp_content_file, status_file, alive_file)
 			if notify_msg then
 				vim.notify(notify_msg, notify_level, { title = "Claude Reviewer" })
 			end
+
+			-- 4. REFRESH FILE EXPLORER
+			-- Delay slightly so the file is on disk before neo-tree scans
+			vim.defer_fn(function()
+				local ok, manager = pcall(require, "neo-tree.sources.manager")
+				if ok then
+					manager.refresh("filesystem")
+				end
+			end, 300)
 		end
 
-		vim.keymap.set("n", M.config.keymaps.approve, function()
-			finish_review(0, "Claude edit approved!", vim.log.levels.INFO)
-		end, { buffer = temp_buf, desc = "Approve Claude Edit" })
+		for _, buf in ipairs({ temp_buf, orig_buf }) do
+			vim.keymap.set("n", M.config.keymaps.approve, function()
+				if vim.api.nvim_get_current_tabpage() == review_tab then
+					finish_review(0, "Claude edit approved!", vim.log.levels.INFO)
+				end
+			end, { buffer = buf, desc = "Approve Claude Edit" })
 
-		vim.keymap.set("n", M.config.keymaps.deny, function()
-			finish_review(2, "Claude edit rejected.", vim.log.levels.WARN)
-		end, { buffer = temp_buf, desc = "Deny Claude Edit" })
+			vim.keymap.set("n", M.config.keymaps.deny, function()
+				if vim.api.nvim_get_current_tabpage() == review_tab then
+					finish_review(2, "Claude edit rejected.", vim.log.levels.WARN)
+				end
+			end, { buffer = buf, desc = "Deny Claude Edit" })
+		end
 
-		-- Close the diff if Claude Code decides before the user reviews in nvim
+		-- Close the diff if Claude Code decides before the user reviews in nvim.
+		-- Two signals: (1) bridge PID dies, (2) target file mtime changes because
+		-- Claude Code accepted via its own UI and wrote the file while the bridge
+		-- was still running (orphaned subprocess).
+		local initial_mtime = vim.fn.getftime(target_file)
 		local timer = vim.uv.new_timer()
 		timer:start(
 			500,
@@ -203,7 +237,11 @@ function M.start_review(target_file, temp_content_file, status_file, alive_file)
 					timer:close()
 					return
 				end
-				if vim.fn.filereadable(alive_file) == 0 then
+				local lines = vim.fn.filereadable(alive_file) == 1 and vim.fn.readfile(alive_file) or {}
+				local pid = tonumber(lines[1])
+				local bridge_alive = pid ~= nil and pcall(vim.uv.kill, pid, 0)
+				local file_changed = vim.fn.getftime(target_file) ~= initial_mtime
+				if not bridge_alive or file_changed then
 					timer:stop()
 					timer:close()
 					finish_review(nil, "Claude review cancelled.", vim.log.levels.WARN)

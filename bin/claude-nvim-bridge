@@ -7,7 +7,7 @@ PAYLOAD=$(cat)
 # 2. Safely extract the tool name and file path using Python
 TOOL_NAME=$(echo "$PAYLOAD" | python3 -c "import sys, json; print(json.load(sys.stdin).get('tool_name', ''))")
 FILE_PATH=$(echo "$PAYLOAD" | python3 -c "import sys, json; print(json.load(sys.stdin).get('tool_input', {}).get('file_path', ''))")
-FILE_PATH=$(realpath "$FILE_PATH")
+FILE_PATH=$(realpath --canonicalize-missing "$FILE_PATH" 2>/dev/null || echo "$FILE_PATH")
 
 # If it's not Edit or Write, allow it to continue normally
 if [[ "$TOOL_NAME" != "Edit" && "$TOOL_NAME" != "Write" ]]; then
@@ -42,11 +42,16 @@ fi
 
 # 4. Extract Claude's proposed code into a temporary file
 NEW_CONTENT_FILE=$(mktemp)
-echo "$PAYLOAD" | python3 -c "import sys, json; print(json.load(sys.stdin).get('tool_input', {}).get('new_string', ''))" >"$NEW_CONTENT_FILE"
+if [[ "$TOOL_NAME" == "Write" ]]; then
+  echo "$PAYLOAD" | python3 -c "import sys, json; print(json.load(sys.stdin).get('tool_input', {}).get('content', ''))" >"$NEW_CONTENT_FILE"
+else
+  echo "$PAYLOAD" | python3 -c "import sys, json; print(json.load(sys.stdin).get('tool_input', {}).get('new_string', ''))" >"$NEW_CONTENT_FILE"
+fi
 
-# 5. Create temp files: status (nvim writes decision) + alive (bridge removes on exit)
+# 5. Create temp files: status (nvim writes decision) + alive (holds bridge PID for liveness check)
 STATUS_FILE=$(mktemp)
 ALIVE_FILE=$(mktemp)
+echo "$$" > "$ALIVE_FILE"
 trap 'rm -f "$ALIVE_FILE" "$NEW_CONTENT_FILE" "$STATUS_FILE"' EXIT
 
 # 6. Send to running Neovim via RPC
