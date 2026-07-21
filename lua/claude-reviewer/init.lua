@@ -148,7 +148,17 @@ function M.setup(opts)
 end
 function M.start_review(target_file, temp_content_file, status_file, alive_file)
 	vim.schedule(function()
+		-- Track whether the target file was already open before this review so we
+		-- know whether to close it when the review ends.
+		local abs_target = vim.fn.fnamemodify(target_file, ":p")
+		local was_preexisting = vim.fn.bufnr(abs_target) ~= -1
+
 		vim.cmd("tabnew")
+		-- Capture the unnamed buffer tabnew creates. If the target file was already
+		-- open, `edit` will switch to its existing buffer, leaving this one orphaned
+		-- as "No Name".
+		local tabnew_buf = vim.api.nvim_get_current_buf()
+
 		vim.cmd("edit " .. vim.fn.fnameescape(target_file))
 		vim.cmd("vsplit " .. vim.fn.fnameescape(temp_content_file))
 		vim.cmd("windo diffthis")
@@ -159,6 +169,10 @@ function M.start_review(target_file, temp_content_file, status_file, alive_file)
 		local orig_buf = vim.api.nvim_get_current_buf()
 		vim.cmd("wincmd l")
 		local done = false
+
+		-- If tabnew_buf differs from both orig_buf and temp_buf, it's the unnamed
+		-- orphan that would otherwise show as "No Name" in the buffer list.
+		local orphan_buf = (tabnew_buf ~= orig_buf and tabnew_buf ~= temp_buf) and tabnew_buf or nil
 
 		local function finish_review(exit_code, notify_msg, notify_level)
 			if done then
@@ -181,6 +195,15 @@ function M.start_review(target_file, temp_content_file, status_file, alive_file)
 			end
 			if vim.api.nvim_buf_is_valid(temp_buf) then
 				pcall(vim.api.nvim_buf_delete, temp_buf, { force = true })
+			end
+			-- Delete the orphaned unnamed buffer left by tabnew when we switched to
+			-- an already-open target file buffer.
+			if orphan_buf and vim.api.nvim_buf_is_valid(orphan_buf) then
+				pcall(vim.api.nvim_buf_delete, orphan_buf, { force = true })
+			end
+			-- Close the target file buffer only if it wasn't open before this review.
+			if not was_preexisting and vim.api.nvim_buf_is_valid(orig_buf) then
+				pcall(vim.api.nvim_buf_delete, orig_buf, { force = true })
 			end
 
 			-- 2. NOW UNBLOCK CLAUDE
