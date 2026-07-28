@@ -1,0 +1,26 @@
+#!/bin/bash
+# bin/claude-nvim-post-bridge
+# PostToolUse hook: if the user edited Claude's proposed content during review,
+# overwrite the file Claude just wrote with the user's version.
+
+PAYLOAD=$(cat)
+TOOL_NAME=$(echo "$PAYLOAD" | python3 -c "import sys, json; print(json.load(sys.stdin).get('tool_name', ''))")
+FILE_PATH=$(echo "$PAYLOAD" | python3 -c "import sys, json; print(json.load(sys.stdin).get('tool_input', {}).get('file_path', ''))")
+FILE_PATH=$(realpath --canonicalize-missing "$FILE_PATH" 2>/dev/null || echo "$FILE_PATH")
+
+if [[ "$TOOL_NAME" != "Edit" && "$TOOL_NAME" != "Write" ]]; then
+  exit 0
+fi
+
+if [ -z "$FILE_PATH" ]; then
+  exit 0
+fi
+
+HASH=$(python3 -c "import hashlib, sys; print(hashlib.sha256(sys.argv[1].encode()).hexdigest()[:8])" "$FILE_PATH")
+PENDING="/tmp/claude-nvim-pending-${HASH}.txt"
+
+if [ -f "$PENDING" ]; then
+  cp "$PENDING" "$FILE_PATH"
+  rm -f "$PENDING"
+fi
+exit 0

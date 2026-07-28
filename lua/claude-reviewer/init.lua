@@ -72,9 +72,11 @@ function M.setup(opts)
 		return
 	end
 	local bridge_path = plugin_root .. "/bin/claude-nvim-bridge"
+	local post_bridge_path = plugin_root .. "/bin/claude-nvim-post-bridge"
 
-	-- 2. Make sure the bridge script is executable
+	-- 2. Make sure the bridge scripts are executable
 	vim.fn.system({ "chmod", "+x", bridge_path })
+	vim.fn.system({ "chmod", "+x", post_bridge_path })
 
 	-- 3. Automatically inject the hook into ~/.claude/settings.json
 	local settings_path = vim.fn.expand("~/.claude/settings.json")
@@ -139,6 +141,31 @@ function M.setup(opts)
 		})
 	end
 
+	-- Register the PostToolUse hook that applies user-modified content after Claude writes
+	settings.hooks.PostToolUse = settings.hooks.PostToolUse or {}
+	local post_exists = false
+	for _, item in ipairs(settings.hooks.PostToolUse) do
+		if item.hooks then
+			for _, hook in ipairs(item.hooks) do
+				if hook.command and hook.command:match("claude%-nvim%-post%-bridge") then
+					hook.command = post_bridge_path
+					post_exists = true
+				end
+			end
+		end
+	end
+	if not post_exists then
+		table.insert(settings.hooks.PostToolUse, {
+			matcher = "Edit|Write",
+			hooks = {
+				{
+					type = "command",
+					command = post_bridge_path,
+				},
+			},
+		})
+	end
+
 	vim.fn.mkdir(vim.fn.expand("~/.claude"), "p")
 	local f = io.open(settings_path, "w")
 	if f then
@@ -179,6 +206,26 @@ function M.start_review(target_file, temp_content_file, status_file, alive_file)
 				return
 			end
 			done = true
+
+			-- If the user edited Claude's proposed content, save it to a side-channel
+			-- file keyed by the target path. The PostToolUse hook (claude-nvim-post-bridge)
+			-- will overwrite the file after Claude's write completes, without denying.
+			if exit_code == 0 and vim.api.nvim_get_option_value("modified", { buf = temp_buf }) then
+				local hash = vim.fn.sha256(abs_target):sub(1, 8)
+				local side_channel = "/tmp/claude-nvim-pending-" .. hash .. ".txt"
+				local lines = vim.api.nvim_buf_get_lines(temp_buf, 0, -1, false)
+				local has_eol = vim.api.nvim_get_option_value("eol", { buf = temp_buf })
+				local content = table.concat(lines, "\n")
+				if has_eol then
+					content = content .. "\n"
+				end
+				local fh = io.open(side_channel, "w")
+				if fh then
+					fh:write(content)
+					fh:close()
+					notify_msg = "Claude edit accepted with your modifications!"
+				end
+			end
 
 			-- 1. CLEAN UP NVIM LAYOUT FIRST
 			-- Close the review tab by handle, not "current" tab — the target file
