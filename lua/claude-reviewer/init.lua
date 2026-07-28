@@ -251,6 +251,13 @@ function M.start_review(target_file, temp_content_file, status_file, alive_file)
 			-- Close the target file buffer only if it wasn't open before this review.
 			if not was_preexisting and vim.api.nvim_buf_is_valid(orig_buf) then
 				pcall(vim.api.nvim_buf_delete, orig_buf, { force = true })
+			elseif vim.api.nvim_buf_is_valid(orig_buf) then
+				-- The buffer survives the review (it was already open), so its
+				-- buffer-local approve/deny maps won't be cleared by deletion.
+				-- Remove them explicitly or they permanently shadow the user's
+				-- normal keymaps (e.g. LSP code action on the same key) in this buffer.
+				pcall(vim.keymap.del, "n", M.config.keymaps.approve, { buffer = orig_buf })
+				pcall(vim.keymap.del, "n", M.config.keymaps.deny, { buffer = orig_buf })
 			end
 
 			-- 2. NOW UNBLOCK CLAUDE
