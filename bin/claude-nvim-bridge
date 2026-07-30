@@ -25,7 +25,15 @@ elif [ -n "$NVIM" ]; then
   SOCKET="$NVIM"
 fi
 
-# Priority 2: Match by cwd — the most reliable cross-workspace strategy
+# Priority 2: Match by CMUX workspace — a workspace groups the panes for one
+# task, so it's scoped tighter than "same repo" and won't hijack an unrelated
+# nvim that just happens to be open elsewhere in the same monorepo.
+if [ -z "$SOCKET" ] && [ -n "$CMUX_WORKSPACE_ID" ]; then
+  CMUX_FILE="/tmp/claude-nvim-cmux-${CMUX_WORKSPACE_ID}.txt"
+  [ -f "$CMUX_FILE" ] && SOCKET=$(cat "$CMUX_FILE")
+fi
+
+# Priority 3: Match by cwd — fallback for when not running inside CMUX
 if [ -z "$SOCKET" ]; then
   CLAUDE_CWD=$(echo "$PAYLOAD" | python3 -c "import sys, json; print(json.load(sys.stdin).get('cwd', ''))" 2>/dev/null)
   if [ -n "$CLAUDE_CWD" ]; then

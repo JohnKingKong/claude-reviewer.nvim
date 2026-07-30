@@ -14,6 +14,10 @@ local function cwd_socket_path(cwd)
 	return string.format("/tmp/claude-nvim-cwd-%s.txt", hash)
 end
 
+local function cmux_socket_path(workspace_id)
+	return string.format("/tmp/claude-nvim-cmux-%s.txt", workspace_id)
+end
+
 local function write_socket_file_at(path)
 	local f = io.open(path, "w")
 	if f then
@@ -34,6 +38,16 @@ local function write_socket_file()
 		if git_root ~= cwd then
 			write_socket_file_at(cwd_socket_path(git_root))
 		end
+	end
+
+	-- Register under the CMUX workspace id, when running inside CMUX. This is
+	-- the strongest signal: a workspace groups the panes for one task, so it
+	-- disambiguates "same repo, unrelated task in another pane" from "same
+	-- task, nvim and claude in different panes/dirs" — cwd/git-root alone
+	-- can't tell those apart in a monorepo.
+	local workspace_id = vim.env.CMUX_WORKSPACE_ID
+	if workspace_id and workspace_id ~= "" then
+		write_socket_file_at(cmux_socket_path(workspace_id))
 	end
 end
 
