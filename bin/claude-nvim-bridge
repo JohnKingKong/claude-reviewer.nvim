@@ -53,7 +53,34 @@ NEW_CONTENT_FILE=$(mktemp)
 if [[ "$TOOL_NAME" == "Write" ]]; then
   echo "$PAYLOAD" | python3 -c "import sys, json; print(json.load(sys.stdin).get('tool_input', {}).get('content', ''))" >"$NEW_CONTENT_FILE"
 else
-  echo "$PAYLOAD" | python3 -c "import sys, json; print(json.load(sys.stdin).get('tool_input', {}).get('new_string', ''))" >"$NEW_CONTENT_FILE"
+  # Edit only gives old_string/new_string (a fragment), not the full file. Diffing
+  # the full original against just that fragment misaligns line numbers and can
+  # make diff show the whole left buffer as deleted. Reconstruct the full
+  # post-edit content by applying the substitution to the current file, so both
+  # sides of the diff are full files.
+  echo "$PAYLOAD" | python3 -c "
+import sys, json
+
+data = json.load(sys.stdin)
+tool_input = data.get('tool_input', {})
+old_string = tool_input.get('old_string', '')
+new_string = tool_input.get('new_string', '')
+replace_all = tool_input.get('replace_all', False)
+
+path = sys.argv[1]
+try:
+    with open(path, 'r') as f:
+        content = f.read()
+except OSError:
+    content = ''
+
+if replace_all:
+    content = content.replace(old_string, new_string)
+else:
+    content = content.replace(old_string, new_string, 1)
+
+sys.stdout.write(content)
+" "$FILE_PATH" >"$NEW_CONTENT_FILE"
 fi
 
 # 5. Create temp files: status (nvim writes decision) + alive (holds bridge PID for liveness check)
