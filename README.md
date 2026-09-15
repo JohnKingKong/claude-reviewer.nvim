@@ -14,15 +14,20 @@ Running Claude Code in a separate terminal (tmux, CMUX, Alacritty) protects your
 
 ## How it works
 
-1. Claude Code fires a `PermissionRequest` hook before every `Edit` or `Write`
-2. The hook script (`claude-nvim-bridge`) finds your Neovim instance for the current workspace via a socket file
-3. Neovim opens the diff in a new tab — side by side, using its native diff engine
-4. You approve with `<leader>ca` or deny with `<leader>cd`
-5. Claude Code receives the decision and proceeds (or stops)
+1. Claude Code fires a `PermissionRequest` hook before every `Edit` or `Write`.
+2. The hook script (`claude-nvim-bridge`) finds the right Neovim instance, in priority order:
+   - the Neovim terminal Claude is running inside (if any)
+   - the CMUX workspace running that task
+   - the current working directory (falling back to its git root)
+3. Neovim opens the diff in a new tab — side by side, using its native diff engine.
+4. You approve with `<leader>ca` or deny with `<leader>cd`.
+5. Claude Code receives the decision and proceeds (or stops).
+
+If you edit Claude's proposed content in the diff before approving, your edits are preserved: a `PostToolUse` hook (`claude-nvim-post-bridge`) overwrites the file Claude just wrote with your version.
 
 **If no Neovim is open for the workspace**, the bridge exits cleanly and Claude Code falls back to its own built-in permission UI — no hanging, no auto-deny.
 
-**If you accept or deny in Claude Code's UI while the diff is open in Neovim**, the diff closes automatically.
+**If you approve or deny in Claude Code's own UI while the diff is still open in Neovim**, the diff closes automatically and reports the outcome accordingly (approved vs. cancelled).
 
 ---
 
@@ -97,18 +102,21 @@ require('claude-reviewer').setup({
 
 ## Architecture
 
-The plugin has two components:
+The plugin has three components:
 
 **`bin/claude-nvim-bridge`** — a bash script registered as a Claude Code `PermissionRequest` hook. On every `Edit`/`Write`:
-- Looks up the workspace's Neovim socket from `/tmp/claude-nvim-cwd-<hash>.txt`
-- If found, sends an RPC to Neovim and waits for the decision (5-minute timeout)
+- Finds the right Neovim socket: the terminal Claude is running inside, then the CMUX workspace, then the cwd/git-root hash file
+- For `Edit` calls (which only carry an `old_string`/`new_string` fragment, not the full file) it reconstructs the full post-edit content so the diff shows complete before/after files
+- If a socket is found, sends an RPC to Neovim and waits for the decision (5-minute timeout)
 - If not found, exits 0 so Claude Code shows its own UI
-- Creates an "alive" sentinel file that Neovim polls; removing it on exit signals Neovim to close any open diff
+- Creates an "alive" sentinel file that Neovim polls; the bridge process dying signals Neovim to close any open diff
+
+**`bin/claude-nvim-post-bridge`** — a bash script registered as a Claude Code `PostToolUse` hook. If you edited Claude's proposed content during review, this overwrites the file Claude just wrote with your version.
 
 **`lua/claude-reviewer/init.lua`** — the Neovim plugin:
-- Writes a workspace socket file at startup (keyed by cwd hash and git root)
+- Writes workspace socket files at startup (keyed by cwd hash, git root, and CMUX workspace id) and keeps them fresh on `DirChanged`
 - Cleans up its socket files on exit
-- Exposes `start_review()` as an RPC entry point that opens the diff tab, sets up keymaps, and polls for the alive sentinel file
+- Exposes `start_review()` as an RPC entry point that opens the diff tab, sets up the approve/deny keymaps, and polls the bridge's liveness and the target file's mtime to detect a decision made from Claude's own UI
 
 The hook and settings injection into `~/.claude/settings.json` happen automatically on `setup()`.
 
