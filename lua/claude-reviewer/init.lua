@@ -335,7 +335,11 @@ function M.start_review(target_file, temp_content_file, status_file, alive_file)
 				if not bridge_alive or file_changed then
 					timer:stop()
 					timer:close()
-					finish_review(nil, "Claude review cancelled.", vim.log.levels.WARN)
+					if file_changed then
+						finish_review(nil, "Claude edit approved!", vim.log.levels.INFO)
+					else
+						finish_review(nil, "Claude review cancelled.", vim.log.levels.WARN)
+					end
 				end
 			end)
 		)
