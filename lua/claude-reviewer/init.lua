@@ -194,6 +194,24 @@ function M.start_review(target_file, temp_content_file, status_file, alive_file)
 		local abs_target = vim.fn.fnamemodify(target_file, ":p")
 		local was_preexisting = vim.fn.bufnr(abs_target) ~= -1
 
+		-- If the edit belongs to a different workspace than the one currently
+		-- focused (e.g. a separate tab-local cwd from floo-network.nvim or
+		-- similar), tabnew below would silently yank focus away from whatever
+		-- the user is actively looking at. Only steal focus when the edit is
+		-- for the workspace you're already in.
+		--
+		-- Resolve symlinks on both sides before comparing: getcwd() returns
+		-- the realpath (e.g. macOS /tmp -> /private/tmp), but fnamemodify(":p")
+		-- on the target does not, so an unresolved comparison falsely treats
+		-- same-workspace edits as a different workspace whenever the path
+		-- passes through a symlink.
+		local origin_tab = vim.api.nvim_get_current_tabpage()
+		local origin_cwd = vim.fn.getcwd(-1, 0)
+		local target_dir = vim.fn.fnamemodify(abs_target, ":h")
+		local resolved_cwd = vim.uv.fs_realpath(origin_cwd) or origin_cwd
+		local resolved_target_dir = vim.uv.fs_realpath(target_dir) or target_dir
+		local same_workspace = vim.startswith(resolved_target_dir, resolved_cwd)
+
 		vim.cmd("tabnew")
 		-- Capture the unnamed buffer tabnew creates. If the target file was already
 		-- open, `edit` will switch to its existing buffer, leaving this one orphaned
@@ -209,6 +227,13 @@ function M.start_review(target_file, temp_content_file, status_file, alive_file)
 		vim.cmd("wincmd h")
 		local orig_buf = vim.api.nvim_get_current_buf()
 		vim.cmd("wincmd l")
+
+		-- The diff is fully built; now decide whether to leave it focused or
+		-- hand focus back to wherever the user actually was.
+		if not same_workspace and vim.api.nvim_tabpage_is_valid(origin_tab) then
+			vim.api.nvim_set_current_tabpage(origin_tab)
+		end
+
 		local done = false
 
 		-- If tabnew_buf differs from both orig_buf and temp_buf, it's the unnamed
@@ -344,11 +369,25 @@ function M.start_review(target_file, temp_content_file, status_file, alive_file)
 			end)
 		)
 
-		vim.notify(
-			string.format("Review pending!\nApprove: %s\nDeny: %s", M.config.keymaps.approve, M.config.keymaps.deny),
-			vim.log.levels.INFO,
-			{ title = "Claude Reviewer" }
-		)
+		if same_workspace then
+			vim.notify(
+				string.format("Review pending!\nApprove: %s\nDeny: %s", M.config.keymaps.approve, M.config.keymaps.deny),
+				vim.log.levels.INFO,
+				{ title = "Claude Reviewer" }
+			)
+		else
+			vim.notify(
+				string.format(
+					"Claude review pending in another workspace (tab %d): %s\nApprove: %s\nDeny: %s",
+					vim.api.nvim_tabpage_get_number(review_tab),
+					vim.fn.fnamemodify(target_file, ":t"),
+					M.config.keymaps.approve,
+					M.config.keymaps.deny
+				),
+				vim.log.levels.WARN,
+				{ title = "Claude Reviewer" }
+			)
+		end
 	end)
 end
 
