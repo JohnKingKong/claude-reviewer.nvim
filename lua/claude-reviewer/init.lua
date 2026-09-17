@@ -27,16 +27,34 @@ local function write_socket_file_at(path)
 	end
 end
 
-local function write_socket_file()
-	local cwd = vim.fn.getcwd()
-	write_socket_file_at(cwd_socket_path(cwd))
+-- Also registers under the git root in case nvim was started in a subdirectory.
+local function register_dir(dir)
+	write_socket_file_at(cwd_socket_path(dir))
 
-	-- Also register under the git root in case nvim was started in a subdirectory
-	local result = vim.fn.system({ "git", "-C", cwd, "rev-parse", "--show-toplevel" })
+	local result = vim.fn.system({ "git", "-C", dir, "rev-parse", "--show-toplevel" })
 	if vim.v.shell_error == 0 then
 		local git_root = vim.trim(result)
-		if git_root ~= cwd then
+		if git_root ~= dir then
 			write_socket_file_at(cwd_socket_path(git_root))
+		end
+	end
+end
+
+-- Registers a socket file for every currently open tab's own local working
+-- directory, not just "the current" one. Workspace-per-tab plugins (e.g.
+-- floo-network.nvim) can set up several tabs with different tab-local cwds
+-- during their own VeryLazy-triggered session restore. Plugin load order
+-- across a shared event like VeryLazy is unspecified — a single "current
+-- cwd" snapshot can miss every tab except whichever happened to be current
+-- when this ran, especially if it runs before such a restore.
+local function write_socket_file()
+	local seen = {}
+	for _, tabid in ipairs(vim.api.nvim_list_tabpages()) do
+		local tabnr = vim.api.nvim_tabpage_get_number(tabid)
+		local dir = vim.fn.getcwd(-1, tabnr)
+		if not seen[dir] then
+			seen[dir] = true
+			register_dir(dir)
 		end
 	end
 
@@ -63,6 +81,14 @@ function M.setup(opts)
 
 	-- Write immediately since LazyVim loads plugins dynamically
 	write_socket_file()
+
+	-- Also defer a scan past the current tick: if another VeryLazy-loaded
+	-- plugin (e.g. a workspace manager restoring several tabs/directories)
+	-- hasn't run yet at the point above - which depends on unspecified
+	-- cross-plugin VeryLazy ordering - its tabs won't exist yet to scan. By
+	-- the time this runs, every synchronous VeryLazy handler dispatched in
+	-- this tick has already completed, regardless of registration order.
+	vim.schedule(write_socket_file)
 
 	-- Also register autocmd as a fallback safety net
 	vim.api.nvim_create_autocmd("VimEnter", {
