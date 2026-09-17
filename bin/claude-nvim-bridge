@@ -111,6 +111,14 @@ RESULT=$(cat "$STATUS_FILE")
 if [ "$RESULT" = "2" ]; then
   echo '{"hookSpecificOutput": {"hookEventName": "PermissionRequest", "decision": {"behavior": "deny", "message": "Edit rejected by user in Neovim."}}}'
   exit 2
+elif [ "$RESULT" = "3" ]; then
+  # start_review() found a live nvim instance for this cwd/git-root/CMUX
+  # socket, but no *open tab* whose own directory actually covers this file
+  # (e.g. edit is for a workspace that isn't currently open). Decline rather
+  # than opening a tab for a workspace that doesn't exist: behave exactly
+  # like "no nvim instance found" so Claude Code's own default permission UI
+  # takes over.
+  exit 0
 else
   echo '{"hookSpecificOutput": {"hookEventName": "PermissionRequest", "decision": {"behavior": "allow"}}}'
   exit 0

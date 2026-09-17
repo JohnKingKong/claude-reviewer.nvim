@@ -213,46 +213,83 @@ function M.setup(opts)
 		f:close()
 	end
 end
+-- Label for a tab in notifications: floo-network.nvim's own workspace name
+-- if set (soft integration - no hard dependency on floo being installed),
+-- else the tab-local directory's basename.
+local function tab_label(tabid)
+	local ok, name = pcall(vim.api.nvim_tabpage_get_var, tabid, "floo_workspace_name")
+	if ok and name then
+		return name
+	end
+	local tabnr = vim.api.nvim_tabpage_get_number(tabid)
+	local cwd = vim.fn.getcwd(-1, tabnr)
+	return vim.fn.fnamemodify(cwd, ":t")
+end
+
+-- Finds the existing tab whose own tab-local directory contains `dir`.
+-- Resolves symlinks on both sides: getcwd() returns the realpath (e.g.
+-- macOS /tmp -> /private/tmp), but the caller's path may not.
+local function find_tab_for_dir(dir)
+	local resolved_dir = vim.uv.fs_realpath(dir) or dir
+	for _, tabid in ipairs(vim.api.nvim_list_tabpages()) do
+		local tabnr = vim.api.nvim_tabpage_get_number(tabid)
+		local tab_cwd = vim.fn.getcwd(-1, tabnr)
+		local resolved_cwd = vim.uv.fs_realpath(tab_cwd) or tab_cwd
+		if vim.startswith(resolved_dir, resolved_cwd) then
+			return tabid
+		end
+	end
+	return nil
+end
+
 function M.start_review(target_file, temp_content_file, status_file, alive_file)
 	vim.schedule(function()
+		local abs_target = vim.fn.fnamemodify(target_file, ":p")
+		local target_dir = vim.fn.fnamemodify(abs_target, ":h")
+
+		-- Never synthesize a new tab for a directory that isn't already open
+		-- as a workspace: that would look like a duplicate of a real one in
+		-- a workspace-per-tab switcher (e.g. floo-network.nvim), counting as
+		-- an extra tab that wasn't there before. If no open tab's own
+		-- directory covers this file, decline entirely - status "3" tells
+		-- the bridge to behave exactly as if no nvim instance were found at
+		-- all, so Claude Code's own default permission UI takes over.
+		local target_tab = find_tab_for_dir(target_dir)
+		if not target_tab then
+			local f = io.open(status_file, "w")
+			if f then
+				f:write("3")
+				f:close()
+			end
+			return
+		end
+
 		-- Track whether the target file was already open before this review so we
 		-- know whether to close it when the review ends.
-		local abs_target = vim.fn.fnamemodify(target_file, ":p")
 		local was_preexisting = vim.fn.bufnr(abs_target) ~= -1
 
-		-- If the edit belongs to a different workspace than the one currently
-		-- focused (e.g. a separate tab-local cwd from floo-network.nvim or
-		-- similar), tabnew below would silently yank focus away from whatever
-		-- the user is actively looking at. Only steal focus when the edit is
-		-- for the workspace you're already in.
-		--
-		-- Resolve symlinks on both sides before comparing: getcwd() returns
-		-- the realpath (e.g. macOS /tmp -> /private/tmp), but fnamemodify(":p")
-		-- on the target does not, so an unresolved comparison falsely treats
-		-- same-workspace edits as a different workspace whenever the path
-		-- passes through a symlink.
 		local origin_tab = vim.api.nvim_get_current_tabpage()
-		local origin_cwd = vim.fn.getcwd(-1, 0)
-		local target_dir = vim.fn.fnamemodify(abs_target, ":h")
-		local resolved_cwd = vim.uv.fs_realpath(origin_cwd) or origin_cwd
-		local resolved_target_dir = vim.uv.fs_realpath(target_dir) or target_dir
-		local same_workspace = vim.startswith(resolved_target_dir, resolved_cwd)
+		local same_workspace = target_tab == origin_tab
 
-		vim.cmd("tabnew")
-		-- Capture the unnamed buffer tabnew creates. If the target file was already
-		-- open, `edit` will switch to its existing buffer, leaving this one orphaned
-		-- as "No Name".
-		local tabnew_buf = vim.api.nvim_get_current_buf()
+		-- Build the diff as a split inside the real workspace tab, never a
+		-- new tab of its own - scope diffthis to exactly these two windows
+		-- rather than `windo`, since target_tab may already have other
+		-- windows (e.g. a neo-tree sidebar) that must be left alone.
+		vim.api.nvim_set_current_tabpage(target_tab)
 
-		vim.cmd("edit " .. vim.fn.fnameescape(target_file))
-		vim.cmd("vsplit " .. vim.fn.fnameescape(temp_content_file))
-		vim.cmd("windo diffthis")
-
-		local review_tab = vim.api.nvim_get_current_tabpage()
-		local temp_buf = vim.api.nvim_get_current_buf()
-		vim.cmd("wincmd h")
+		vim.cmd("vsplit " .. vim.fn.fnameescape(target_file))
+		local orig_win = vim.api.nvim_get_current_win()
 		local orig_buf = vim.api.nvim_get_current_buf()
-		vim.cmd("wincmd l")
+		vim.api.nvim_win_call(orig_win, function()
+			vim.cmd("diffthis")
+		end)
+
+		vim.cmd("vsplit " .. vim.fn.fnameescape(temp_content_file))
+		local temp_win = vim.api.nvim_get_current_win()
+		local temp_buf = vim.api.nvim_get_current_buf()
+		vim.api.nvim_win_call(temp_win, function()
+			vim.cmd("diffthis")
+		end)
 
 		-- The diff is fully built; now decide whether to leave it focused or
 		-- hand focus back to wherever the user actually was.
@@ -261,10 +298,6 @@ function M.start_review(target_file, temp_content_file, status_file, alive_file)
 		end
 
 		local done = false
-
-		-- If tabnew_buf differs from both orig_buf and temp_buf, it's the unnamed
-		-- orphan that would otherwise show as "No Name" in the buffer list.
-		local orphan_buf = (tabnew_buf ~= orig_buf and tabnew_buf ~= temp_buf) and tabnew_buf or nil
 
 		local function finish_review(exit_code, notify_msg, notify_level)
 			if done then
@@ -293,29 +326,23 @@ function M.start_review(target_file, temp_content_file, status_file, alive_file)
 			end
 
 			-- 1. CLEAN UP NVIM LAYOUT FIRST
-			-- Close the review tab by handle, not "current" tab — the target file
-			-- buffer may be visible in other tabs, causing tabclose to close the
-			-- wrong tab when the keymap fires from outside the review tab.
-			if vim.api.nvim_tabpage_is_valid(review_tab) then
-				local tabnr = vim.api.nvim_tabpage_get_number(review_tab)
-				if #vim.api.nvim_list_tabpages() > 1 then
-					pcall(vim.cmd, tabnr .. "tabclose")
-				else
-					pcall(vim.cmd, "only")
-					vim.cmd("enew")
-				end
+			-- Close just the two split windows we created, restoring whatever
+			-- else target_tab had (e.g. neo-tree) - never the whole tab, which
+			-- is a real workspace that may predate this review entirely.
+			if vim.api.nvim_win_is_valid(temp_win) then
+				pcall(vim.api.nvim_win_close, temp_win, true)
 			end
 			if vim.api.nvim_buf_is_valid(temp_buf) then
 				pcall(vim.api.nvim_buf_delete, temp_buf, { force = true })
 			end
-			-- Delete the orphaned unnamed buffer left by tabnew when we switched to
-			-- an already-open target file buffer.
-			if orphan_buf and vim.api.nvim_buf_is_valid(orphan_buf) then
-				pcall(vim.api.nvim_buf_delete, orphan_buf, { force = true })
-			end
-			-- Close the target file buffer only if it wasn't open before this review.
-			if not was_preexisting and vim.api.nvim_buf_is_valid(orig_buf) then
-				pcall(vim.api.nvim_buf_delete, orig_buf, { force = true })
+			-- Close the target file's window/buffer only if it wasn't open before this review.
+			if not was_preexisting then
+				if vim.api.nvim_win_is_valid(orig_win) then
+					pcall(vim.api.nvim_win_close, orig_win, true)
+				end
+				if vim.api.nvim_buf_is_valid(orig_buf) then
+					pcall(vim.api.nvim_buf_delete, orig_buf, { force = true })
+				end
 			elseif vim.api.nvim_buf_is_valid(orig_buf) then
 				-- The buffer survives the review (it was already open), so its
 				-- buffer-local approve/deny maps won't be cleared by deletion.
@@ -352,13 +379,13 @@ function M.start_review(target_file, temp_content_file, status_file, alive_file)
 
 		for _, buf in ipairs({ temp_buf, orig_buf }) do
 			vim.keymap.set("n", M.config.keymaps.approve, function()
-				if vim.api.nvim_get_current_tabpage() == review_tab then
+				if vim.api.nvim_get_current_tabpage() == target_tab then
 					finish_review(0, "Claude edit approved!", vim.log.levels.INFO)
 				end
 			end, { buffer = buf, desc = "Approve Claude Edit" })
 
 			vim.keymap.set("n", M.config.keymaps.deny, function()
-				if vim.api.nvim_get_current_tabpage() == review_tab then
+				if vim.api.nvim_get_current_tabpage() == target_tab then
 					finish_review(2, "Claude edit rejected.", vim.log.levels.WARN)
 				end
 			end, { buffer = buf, desc = "Deny Claude Edit" })
@@ -404,8 +431,8 @@ function M.start_review(target_file, temp_content_file, status_file, alive_file)
 		else
 			vim.notify(
 				string.format(
-					"Claude review pending in another workspace (tab %d): %s\nApprove: %s\nDeny: %s",
-					vim.api.nvim_tabpage_get_number(review_tab),
+					"Claude review pending in %s: %s\nApprove: %s\nDeny: %s",
+					tab_label(target_tab),
 					vim.fn.fnamemodify(target_file, ":t"),
 					M.config.keymaps.approve,
 					M.config.keymaps.deny
