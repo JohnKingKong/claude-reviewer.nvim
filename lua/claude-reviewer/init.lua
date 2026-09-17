@@ -236,6 +236,16 @@ local function tab_label(tabid)
 	return vim.fn.fnamemodify(cwd, ":t")
 end
 
+-- Finds a window in `tabid` that's already displaying `bufnr`, if any.
+local function find_win_for_buf_in_tab(tabid, bufnr)
+	for _, win in ipairs(vim.api.nvim_tabpage_list_wins(tabid)) do
+		if vim.api.nvim_win_get_buf(win) == bufnr then
+			return win
+		end
+	end
+	return nil
+end
+
 -- Finds the existing tab whose own tab-local directory contains `dir`.
 -- Resolves symlinks on both sides: getcwd() returns the realpath (e.g.
 -- macOS /tmp -> /private/tmp), but the caller's path may not.
@@ -293,9 +303,21 @@ function M.start_review(target_file, temp_content_file, status_file, alive_file)
 		-- windows (e.g. a neo-tree sidebar) that must be left alone.
 		vim.api.nvim_set_current_tabpage(target_tab)
 
-		vim.cmd("vsplit " .. vim.fn.fnameescape(target_file))
-		local orig_win = vim.api.nvim_get_current_win()
-		local orig_buf = vim.api.nvim_get_current_buf()
+		-- If the file is already visible in a window in this tab (e.g. it's
+		-- the file you're actively editing), diff it in place there instead
+		-- of opening a second, redundant window onto the exact same buffer.
+		local target_bufnr = vim.fn.bufnr(abs_target)
+		local reused_win = target_bufnr ~= -1 and find_win_for_buf_in_tab(target_tab, target_bufnr) or nil
+
+		local orig_win, orig_buf
+		if reused_win then
+			vim.api.nvim_set_current_win(reused_win)
+			orig_win, orig_buf = reused_win, target_bufnr
+		else
+			vim.cmd("vsplit " .. vim.fn.fnameescape(target_file))
+			orig_win = vim.api.nvim_get_current_win()
+			orig_buf = vim.api.nvim_get_current_buf()
+		end
 		vim.api.nvim_win_call(orig_win, function()
 			vim.cmd("diffthis")
 		end)
@@ -351,21 +373,43 @@ function M.start_review(target_file, temp_content_file, status_file, alive_file)
 			if vim.api.nvim_buf_is_valid(temp_buf) then
 				pcall(vim.api.nvim_buf_delete, temp_buf, { force = true })
 			end
-			-- Close the target file's window/buffer only if it wasn't open before this review.
-			if not was_preexisting then
+			if reused_win then
+				-- orig_win was the user's own pre-existing window (the file
+				-- they were actively viewing/editing in this tab) - we never
+				-- created it, so just turn diffthis back off and remove the
+				-- temporary keymaps, leaving everything else exactly as it was.
+				if vim.api.nvim_win_is_valid(orig_win) then
+					vim.api.nvim_win_call(orig_win, function()
+						pcall(vim.cmd, "diffoff")
+					end)
+				end
+				if vim.api.nvim_buf_is_valid(orig_buf) then
+					pcall(vim.keymap.del, "n", M.config.keymaps.approve, { buffer = orig_buf })
+					pcall(vim.keymap.del, "n", M.config.keymaps.deny, { buffer = orig_buf })
+				end
+			elseif not was_preexisting then
+				-- Brand new: close the window we created for it and delete
+				-- the buffer entirely.
 				if vim.api.nvim_win_is_valid(orig_win) then
 					pcall(vim.api.nvim_win_close, orig_win, true)
 				end
 				if vim.api.nvim_buf_is_valid(orig_buf) then
 					pcall(vim.api.nvim_buf_delete, orig_buf, { force = true })
 				end
-			elseif vim.api.nvim_buf_is_valid(orig_buf) then
-				-- The buffer survives the review (it was already open), so its
-				-- buffer-local approve/deny maps won't be cleared by deletion.
-				-- Remove them explicitly or they permanently shadow the user's
-				-- normal keymaps (e.g. LSP code action on the same key) in this buffer.
-				pcall(vim.keymap.del, "n", M.config.keymaps.approve, { buffer = orig_buf })
-				pcall(vim.keymap.del, "n", M.config.keymaps.deny, { buffer = orig_buf })
+			else
+				-- Open elsewhere (e.g. a different tab) but not visible in
+				-- this one - close just the window we created for it here;
+				-- the buffer stays alive for wherever else it's shown. Its
+				-- buffer-local approve/deny maps won't be cleared by that, so
+				-- remove them explicitly or they permanently shadow the
+				-- user's normal keymaps (e.g. LSP code action on the same key).
+				if vim.api.nvim_win_is_valid(orig_win) then
+					pcall(vim.api.nvim_win_close, orig_win, true)
+				end
+				if vim.api.nvim_buf_is_valid(orig_buf) then
+					pcall(vim.keymap.del, "n", M.config.keymaps.approve, { buffer = orig_buf })
+					pcall(vim.keymap.del, "n", M.config.keymaps.deny, { buffer = orig_buf })
+				end
 			end
 
 			-- 2. NOW UNBLOCK CLAUDE
