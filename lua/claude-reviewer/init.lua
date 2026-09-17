@@ -7,6 +7,16 @@ M.config = {
 	},
 }
 
+-- Shared with bin/claude-nvim-bridge's own log() so a single review attempt
+-- can be traced end-to-end across the bash and Lua sides.
+local function log(msg)
+	local f = io.open("/tmp/claude-reviewer-debug.log", "a")
+	if f then
+		f:write(string.format("%s [nvim] %s\n", os.date("%Y-%m-%d %H:%M:%S"), msg))
+		f:close()
+	end
+end
+
 local written_files = {}
 
 local function cwd_socket_path(cwd)
@@ -231,11 +241,14 @@ end
 -- macOS /tmp -> /private/tmp), but the caller's path may not.
 local function find_tab_for_dir(dir)
 	local resolved_dir = vim.uv.fs_realpath(dir) or dir
+	log(string.format("find_tab_for_dir: target_dir=%s resolved=%s", dir, resolved_dir))
 	for _, tabid in ipairs(vim.api.nvim_list_tabpages()) do
 		local tabnr = vim.api.nvim_tabpage_get_number(tabid)
 		local tab_cwd = vim.fn.getcwd(-1, tabnr)
 		local resolved_cwd = vim.uv.fs_realpath(tab_cwd) or tab_cwd
-		if vim.startswith(resolved_dir, resolved_cwd) then
+		local matches = vim.startswith(resolved_dir, resolved_cwd)
+		log(string.format("  tab %d: cwd=%s resolved=%s matches=%s", tabnr, tab_cwd, resolved_cwd, tostring(matches)))
+		if matches then
 			return tabid
 		end
 	end
@@ -243,6 +256,7 @@ local function find_tab_for_dir(dir)
 end
 
 function M.start_review(target_file, temp_content_file, status_file, alive_file)
+	log(string.format("start_review called: target_file=%s status_file=%s", target_file, status_file))
 	vim.schedule(function()
 		local abs_target = vim.fn.fnamemodify(target_file, ":p")
 		local target_dir = vim.fn.fnamemodify(abs_target, ":h")
@@ -256,6 +270,7 @@ function M.start_review(target_file, temp_content_file, status_file, alive_file)
 		-- all, so Claude Code's own default permission UI takes over.
 		local target_tab = find_tab_for_dir(target_dir)
 		if not target_tab then
+			log("no matching tab found, declining (status=3)")
 			local f = io.open(status_file, "w")
 			if f then
 				f:write("3")
@@ -263,6 +278,7 @@ function M.start_review(target_file, temp_content_file, status_file, alive_file)
 			end
 			return
 		end
+		log(string.format("matched tab %d", vim.api.nvim_tabpage_get_number(target_tab)))
 
 		-- Track whether the target file was already open before this review so we
 		-- know whether to close it when the review ends.

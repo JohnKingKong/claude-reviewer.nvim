@@ -1,6 +1,11 @@
 #!/bin/bash
 # bin/claude-nvim-bridge
 
+DEBUG_LOG="/tmp/claude-reviewer-debug.log"
+log() {
+  echo "$(date '+%Y-%m-%d %H:%M:%S') [bridge pid=$$] $1" >> "$DEBUG_LOG"
+}
+
 # 1. Read the JSON payload from Claude Code via stdin
 PAYLOAD=$(cat)
 
@@ -9,20 +14,26 @@ TOOL_NAME=$(echo "$PAYLOAD" | python3 -c "import sys, json; print(json.load(sys.
 FILE_PATH=$(echo "$PAYLOAD" | python3 -c "import sys, json; print(json.load(sys.stdin).get('tool_input', {}).get('file_path', ''))")
 FILE_PATH=$(realpath --canonicalize-missing "$FILE_PATH" 2>/dev/null || echo "$FILE_PATH")
 
+log "invoked: tool=$TOOL_NAME file=$FILE_PATH NVIM_LISTEN_ADDRESS=${NVIM_LISTEN_ADDRESS:-<unset>} NVIM=${NVIM:-<unset>} CMUX_WORKSPACE_ID=${CMUX_WORKSPACE_ID:-<unset>}"
+
 # If it's not Edit or Write, allow it to continue normally
 if [[ "$TOOL_NAME" != "Edit" && "$TOOL_NAME" != "Write" ]]; then
+  log "not Edit/Write, allowing without review"
   exit 0
 fi
 
 # 3. Find the Neovim socket for this specific workspace
 
 SOCKET=""
+SOCKET_SOURCE=""
 
 # Priority 1: Claude is running inside a Neovim terminal — use that instance directly
 if [ -n "$NVIM_LISTEN_ADDRESS" ]; then
   SOCKET="$NVIM_LISTEN_ADDRESS"
+  SOCKET_SOURCE="NVIM_LISTEN_ADDRESS env var"
 elif [ -n "$NVIM" ]; then
   SOCKET="$NVIM"
+  SOCKET_SOURCE="NVIM env var"
 fi
 
 # Priority 2: Match by CMUX workspace — a workspace groups the panes for one
@@ -30,7 +41,10 @@ fi
 # nvim that just happens to be open elsewhere in the same monorepo.
 if [ -z "$SOCKET" ] && [ -n "$CMUX_WORKSPACE_ID" ]; then
   CMUX_FILE="/tmp/claude-nvim-cmux-${CMUX_WORKSPACE_ID}.txt"
-  [ -f "$CMUX_FILE" ] && SOCKET=$(cat "$CMUX_FILE")
+  if [ -f "$CMUX_FILE" ]; then
+    SOCKET=$(cat "$CMUX_FILE")
+    SOCKET_SOURCE="CMUX file $CMUX_FILE"
+  fi
 fi
 
 # Priority 3: Match by cwd — fallback for when not running inside CMUX
@@ -39,12 +53,21 @@ if [ -z "$SOCKET" ]; then
   if [ -n "$CLAUDE_CWD" ]; then
     CWD_HASH=$(python3 -c "import hashlib, sys; print(hashlib.sha256(sys.argv[1].encode()).hexdigest()[:8])" "$CLAUDE_CWD" 2>/dev/null)
     CWD_FILE="/tmp/claude-nvim-cwd-${CWD_HASH}.txt"
-    [ -f "$CWD_FILE" ] && SOCKET=$(cat "$CWD_FILE")
+    log "trying cwd match: CLAUDE_CWD=$CLAUDE_CWD hash=$CWD_HASH file=$CWD_FILE exists=$([ -f "$CWD_FILE" ] && echo yes || echo no)"
+    if [ -f "$CWD_FILE" ]; then
+      SOCKET=$(cat "$CWD_FILE")
+      SOCKET_SOURCE="cwd file $CWD_FILE (CLAUDE_CWD=$CLAUDE_CWD)"
+    fi
+  else
+    log "no cwd in payload"
   fi
 fi
 
+log "resolved socket=${SOCKET:-<none>} source=${SOCKET_SOURCE:-<none>} is_valid_socket=$([ -S "$SOCKET" ] && echo yes || echo no)"
+
 # No Neovim for this workspace — let Claude Code show its own permission UI
 if [ -z "$SOCKET" ] || [ ! -S "$SOCKET" ]; then
+  log "no valid socket, exiting 0 (Claude Code's own UI takes over)"
   exit 0
 fi
 
@@ -90,7 +113,9 @@ echo "$$" > "$ALIVE_FILE"
 trap 'rm -f "$ALIVE_FILE" "$NEW_CONTENT_FILE" "$STATUS_FILE"' EXIT
 
 # 6. Send to running Neovim via RPC
-nvim --server "$SOCKET" --remote-expr "luaeval(\"require('claude-reviewer').start_review('$FILE_PATH', '$NEW_CONTENT_FILE', '$STATUS_FILE', '$ALIVE_FILE')\")" >/dev/null 2>&1
+RPC_OUTPUT=$(nvim --server "$SOCKET" --remote-expr "luaeval(\"require('claude-reviewer').start_review('$FILE_PATH', '$NEW_CONTENT_FILE', '$STATUS_FILE', '$ALIVE_FILE')\")" 2>&1)
+RPC_EXIT=$?
+log "RPC sent to $SOCKET, exit=$RPC_EXIT output=${RPC_OUTPUT:-<empty>}"
 
 # 7. Wait for the user to approve or deny in Neovim (timeout after 5 minutes)
 TIMEOUT=300
@@ -99,6 +124,7 @@ while [ ! -s "$STATUS_FILE" ]; do
   sleep 0.5
   ELAPSED=$((ELAPSED + 1))
   if [ "$ELAPSED" -ge "$((TIMEOUT * 2))" ]; then
+    log "timed out waiting for status_file"
     rm -f "$NEW_CONTENT_FILE" "$STATUS_FILE"
     echo '{"hookSpecificOutput": {"hookEventName": "PermissionRequest", "decision": {"behavior": "deny", "message": "Review timed out."}}}'
     exit 2
@@ -106,6 +132,7 @@ while [ ! -s "$STATUS_FILE" ]; do
 done
 
 RESULT=$(cat "$STATUS_FILE")
+log "status_file result=$RESULT"
 
 # 8. Read decision and respond directly to Claude Code's permission engine
 if [ "$RESULT" = "2" ]; then
