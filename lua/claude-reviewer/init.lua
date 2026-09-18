@@ -236,14 +236,29 @@ local function tab_label(tabid)
 	return vim.fn.fnamemodify(cwd, ":t")
 end
 
--- Finds a window in `tabid` that's already displaying `bufnr`, if any.
-local function find_win_for_buf_in_tab(tabid, bufnr)
-	for _, win in ipairs(vim.api.nvim_tabpage_list_wins(tabid)) do
-		if vim.api.nvim_win_get_buf(win) == bufnr then
-			return win
-		end
+-- Loads (without displaying) the buffer for `path`, reusing it if it's
+-- already loaded elsewhere - buffers are global, so this is the same buffer
+-- object as wherever else the file might already be open.
+local function open_file_buf(path)
+	local bufnr = vim.fn.bufadd(path)
+	-- A stale swap file (e.g. from a crashed session) makes bufload() throw
+	-- E325 rather than prompt, since there's no interactive dialog to show
+	-- from this RPC context - scope a SwapExists handler to just this load
+	-- so it doesn't depend on the user having one set up globally.
+	local aug = vim.api.nvim_create_augroup("ClaudeReviewerSwapExists", { clear = true })
+	vim.api.nvim_create_autocmd("SwapExists", {
+		group = aug,
+		once = true,
+		callback = function()
+			vim.v.swapchoice = "e"
+		end,
+	})
+	local ok, err = pcall(vim.fn.bufload, bufnr)
+	vim.api.nvim_del_augroup_by_id(aug)
+	if not ok then
+		log(string.format("open_file_buf: bufload failed for %s: %s", path, tostring(err)))
 	end
-	return nil
+	return bufnr
 end
 
 -- Finds the existing tab whose own tab-local directory contains `dir`.
@@ -321,34 +336,46 @@ function M.start_review(target_file, temp_content_file, status_file, alive_file)
 		local origin_tab = vim.api.nvim_get_current_tabpage()
 		local same_workspace = target_tab == origin_tab
 
-		-- Build the diff as a split inside the real workspace tab, never a
-		-- new tab of its own - scope diffthis to exactly these two windows
-		-- rather than `windo`, since target_tab may already have other
-		-- windows (e.g. a neo-tree sidebar) that must be left alone.
+		-- Build the diff as a pair of floating windows inside the real
+		-- workspace tab, never a new tab of its own and never a split
+		-- carved out of whatever's already in that tab's layout (a file
+		-- you're reading, the startup dashboard, or even the exact file
+		-- being edited, producing a redundant duplicate) - a float overlays
+		-- the tab without touching its layout at all, so there's nothing to
+		-- disturb and nothing to restore afterward.
 		vim.api.nvim_set_current_tabpage(target_tab)
 
-		-- If the file is already visible in a window in this tab (e.g. it's
-		-- the file you're actively editing), diff it in place there instead
-		-- of opening a second, redundant window onto the exact same buffer.
-		local target_bufnr = vim.fn.bufnr(abs_target)
-		local reused_win = target_bufnr ~= -1 and find_win_for_buf_in_tab(target_tab, target_bufnr) or nil
+		local width = math.floor(vim.o.columns * 0.9)
+		local height = math.floor(vim.o.lines * 0.85)
+		local row = math.floor((vim.o.lines - height) / 2)
+		local col = math.floor((vim.o.columns - width) / 2)
+		local left_width = math.floor((width - 1) / 2)
+		local right_width = width - left_width - 1
 
-		local orig_win, orig_buf
-		if reused_win then
-			vim.api.nvim_set_current_win(reused_win)
-			orig_win, orig_buf = reused_win, target_bufnr
-		else
-			vim.cmd("vsplit " .. vim.fn.fnameescape(target_file))
-			orig_win = vim.api.nvim_get_current_win()
-			orig_buf = vim.api.nvim_get_current_buf()
-		end
+		local orig_buf = open_file_buf(abs_target)
+		local orig_win = vim.api.nvim_open_win(orig_buf, true, {
+			relative = "editor",
+			row = row,
+			col = col,
+			width = left_width,
+			height = height,
+			border = "rounded",
+			title = " " .. vim.fn.fnamemodify(abs_target, ":t") .. " (current) ",
+		})
 		vim.api.nvim_win_call(orig_win, function()
 			vim.cmd("diffthis")
 		end)
 
-		vim.cmd("vsplit " .. vim.fn.fnameescape(temp_content_file))
-		local temp_win = vim.api.nvim_get_current_win()
-		local temp_buf = vim.api.nvim_get_current_buf()
+		local temp_buf = open_file_buf(temp_content_file)
+		local temp_win = vim.api.nvim_open_win(temp_buf, true, {
+			relative = "editor",
+			row = row,
+			col = col + left_width + 1,
+			width = right_width,
+			height = height,
+			border = "rounded",
+			title = " Claude's proposal ",
+		})
 		vim.api.nvim_win_call(temp_win, function()
 			vim.cmd("diffthis")
 		end)
@@ -388,52 +415,30 @@ function M.start_review(target_file, temp_content_file, status_file, alive_file)
 			end
 
 			-- 1. CLEAN UP NVIM LAYOUT FIRST
-			-- Close just the two split windows we created, restoring whatever
-			-- else target_tab had (e.g. neo-tree) - never the whole tab, which
-			-- is a real workspace that may predate this review entirely.
+			-- Close both floating windows - the underlying tab layout was
+			-- never touched, so there's nothing else to restore.
 			if vim.api.nvim_win_is_valid(temp_win) then
 				pcall(vim.api.nvim_win_close, temp_win, true)
 			end
 			if vim.api.nvim_buf_is_valid(temp_buf) then
 				pcall(vim.api.nvim_buf_delete, temp_buf, { force = true })
 			end
-			if reused_win then
-				-- orig_win was the user's own pre-existing window (the file
-				-- they were actively viewing/editing in this tab) - we never
-				-- created it, so just turn diffthis back off and remove the
-				-- temporary keymaps, leaving everything else exactly as it was.
-				if vim.api.nvim_win_is_valid(orig_win) then
-					vim.api.nvim_win_call(orig_win, function()
-						pcall(vim.cmd, "diffoff")
-					end)
-				end
-				if vim.api.nvim_buf_is_valid(orig_buf) then
-					pcall(vim.keymap.del, "n", M.config.keymaps.approve, { buffer = orig_buf })
-					pcall(vim.keymap.del, "n", M.config.keymaps.deny, { buffer = orig_buf })
-				end
-			elseif not was_preexisting then
-				-- Brand new: close the window we created for it and delete
-				-- the buffer entirely.
-				if vim.api.nvim_win_is_valid(orig_win) then
-					pcall(vim.api.nvim_win_close, orig_win, true)
-				end
+			if vim.api.nvim_win_is_valid(orig_win) then
+				pcall(vim.api.nvim_win_close, orig_win, true)
+			end
+			if not was_preexisting then
+				-- Brand new: nobody had this buffer open before, delete it.
 				if vim.api.nvim_buf_is_valid(orig_buf) then
 					pcall(vim.api.nvim_buf_delete, orig_buf, { force = true })
 				end
-			else
-				-- Open elsewhere (e.g. a different tab) but not visible in
-				-- this one - close just the window we created for it here;
-				-- the buffer stays alive for wherever else it's shown. Its
-				-- buffer-local approve/deny maps won't be cleared by that, so
-				-- remove them explicitly or they permanently shadow the
-				-- user's normal keymaps (e.g. LSP code action on the same key).
-				if vim.api.nvim_win_is_valid(orig_win) then
-					pcall(vim.api.nvim_win_close, orig_win, true)
-				end
-				if vim.api.nvim_buf_is_valid(orig_buf) then
-					pcall(vim.keymap.del, "n", M.config.keymaps.approve, { buffer = orig_buf })
-					pcall(vim.keymap.del, "n", M.config.keymaps.deny, { buffer = orig_buf })
-				end
+			elseif vim.api.nvim_buf_is_valid(orig_buf) then
+				-- The buffer survives the review (it was already open
+				-- somewhere), so its buffer-local approve/deny maps won't be
+				-- cleared automatically. Remove them explicitly or they
+				-- permanently shadow the user's normal keymaps (e.g. LSP
+				-- code action on the same key) wherever else it's shown.
+				pcall(vim.keymap.del, "n", M.config.keymaps.approve, { buffer = orig_buf })
+				pcall(vim.keymap.del, "n", M.config.keymaps.deny, { buffer = orig_buf })
 			end
 
 			-- 2. NOW UNBLOCK CLAUDE
