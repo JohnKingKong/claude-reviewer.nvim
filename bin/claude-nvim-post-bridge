@@ -1,7 +1,11 @@
 #!/bin/bash
 # bin/claude-nvim-post-bridge
 # PostToolUse hook: if the user edited Claude's proposed content during review,
-# overwrite the file Claude just wrote with the user's version.
+# overwrite the file Claude just wrote with the user's version. Then, if a
+# buffer for this file is open anywhere in Neovim, reload it - the write
+# happens entirely outside Neovim's own event loop, so a buffer that was
+# already open (and therefore reused rather than recreated) never notices
+# the on-disk change on its own.
 
 PAYLOAD=$(cat)
 TOOL_NAME=$(echo "$PAYLOAD" | python3 -c "import sys, json; print(json.load(sys.stdin).get('tool_name', ''))")
@@ -23,4 +27,31 @@ if [ -f "$PENDING" ]; then
   cp "$PENDING" "$FILE_PATH"
   rm -f "$PENDING"
 fi
+
+# Find the same Neovim instance the main bridge would have used (same
+# priority order), to reload any open buffer for this file now that the
+# write is actually done.
+SOCKET=""
+if [ -n "$NVIM_LISTEN_ADDRESS" ]; then
+  SOCKET="$NVIM_LISTEN_ADDRESS"
+elif [ -n "$NVIM" ]; then
+  SOCKET="$NVIM"
+fi
+if [ -z "$SOCKET" ] && [ -n "$CMUX_WORKSPACE_ID" ]; then
+  CMUX_FILE="/tmp/claude-nvim-cmux-${CMUX_WORKSPACE_ID}.txt"
+  [ -f "$CMUX_FILE" ] && SOCKET=$(cat "$CMUX_FILE")
+fi
+if [ -z "$SOCKET" ]; then
+  CLAUDE_CWD=$(echo "$PAYLOAD" | python3 -c "import sys, json; print(json.load(sys.stdin).get('cwd', ''))" 2>/dev/null)
+  if [ -n "$CLAUDE_CWD" ]; then
+    CWD_HASH=$(python3 -c "import hashlib, sys; print(hashlib.sha256(sys.argv[1].encode()).hexdigest()[:8])" "$CLAUDE_CWD" 2>/dev/null)
+    CWD_FILE="/tmp/claude-nvim-cwd-${CWD_HASH}.txt"
+    [ -f "$CWD_FILE" ] && SOCKET=$(cat "$CWD_FILE")
+  fi
+fi
+
+if [ -n "$SOCKET" ] && [ -S "$SOCKET" ]; then
+  nvim --server "$SOCKET" --remote-expr "luaeval(\"require('claude-reviewer').reload_buffer('$FILE_PATH')\")" >/dev/null 2>&1
+fi
+
 exit 0

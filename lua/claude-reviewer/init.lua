@@ -265,6 +265,30 @@ local function find_tab_for_dir(dir)
 	return nil
 end
 
+-- RPC entry point for the PostToolUse hook (claude-nvim-post-bridge), called
+-- once Claude's write has actually completed. If a buffer for this file is
+-- open anywhere (e.g. it was already open when the review ran, so
+-- start_review reused that window instead of a fresh one), Neovim never
+-- sees the on-disk change on its own - reload it directly so it doesn't sit
+-- there showing the stale pre-edit content until manually reopened.
+function M.reload_buffer(file_path)
+	local abs = vim.fn.fnamemodify(file_path, ":p")
+	local bufnr = vim.fn.bufnr(abs)
+	if bufnr == -1 or not vim.api.nvim_buf_is_valid(bufnr) then
+		return
+	end
+	if vim.api.nvim_get_option_value("modified", { buf = bufnr }) then
+		-- Don't clobber unsaved local changes.
+		return
+	end
+	local ok, lines = pcall(vim.fn.readfile, abs)
+	if not ok then
+		return
+	end
+	vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, lines)
+	vim.api.nvim_set_option_value("modified", false, { buf = bufnr })
+end
+
 function M.start_review(target_file, temp_content_file, status_file, alive_file)
 	log(string.format("start_review called: target_file=%s status_file=%s", target_file, status_file))
 	vim.schedule(function()
