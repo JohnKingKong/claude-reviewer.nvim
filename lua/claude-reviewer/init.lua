@@ -261,23 +261,32 @@ local function open_file_buf(path)
 	return bufnr
 end
 
--- Finds the existing tab whose own tab-local directory contains `dir`.
+-- Finds the existing tab whose own tab-local directory contains `dir`,
+-- preferring the most specific (longest) matching directory rather than
+-- just the first tab encountered - e.g. a tab rooted at a generic parent
+-- folder (`~/Evolia`) would otherwise win over a tab rooted at the actual
+-- repo (`~/Evolia/voila-mobile`) just because it happens to be listed
+-- first, silently routing the review to the wrong workspace.
 -- Resolves symlinks on both sides: getcwd() returns the realpath (e.g.
 -- macOS /tmp -> /private/tmp), but the caller's path may not.
 local function find_tab_for_dir(dir)
 	local resolved_dir = vim.uv.fs_realpath(dir) or dir
 	log(string.format("find_tab_for_dir: target_dir=%s resolved=%s", dir, resolved_dir))
+	local best_tab, best_len = nil, -1
 	for _, tabid in ipairs(vim.api.nvim_list_tabpages()) do
 		local tabnr = vim.api.nvim_tabpage_get_number(tabid)
 		local tab_cwd = vim.fn.getcwd(-1, tabnr)
 		local resolved_cwd = vim.uv.fs_realpath(tab_cwd) or tab_cwd
 		local matches = vim.startswith(resolved_dir, resolved_cwd)
 		log(string.format("  tab %d: cwd=%s resolved=%s matches=%s", tabnr, tab_cwd, resolved_cwd, tostring(matches)))
-		if matches then
-			return tabid
+		if matches and #resolved_cwd > best_len then
+			best_tab, best_len = tabid, #resolved_cwd
 		end
 	end
-	return nil
+	if best_tab then
+		log(string.format("find_tab_for_dir: most specific match is tab %d", vim.api.nvim_tabpage_get_number(best_tab)))
+	end
+	return best_tab
 end
 
 -- RPC entry point for the PostToolUse hook (claude-nvim-post-bridge), called
@@ -343,11 +352,22 @@ function M.start_review(target_file, temp_content_file, status_file, alive_file)
 		-- being edited, producing a redundant duplicate) - a float overlays
 		-- the tab without touching its layout at all, so there's nothing to
 		-- disturb and nothing to restore afterward.
-		log("entering target_tab")
-		vim.api.nvim_set_current_tabpage(target_tab)
-		log("entered target_tab")
+		--
+		-- Deferred to its own scheduled tick: three crashes today (confirmed
+		-- via crash reports, all identical: SIGSEGV in buf_copy_options,
+		-- called from win_enter_ext/enter_tabpage/nvim_set_current_tabpage)
+		-- all correlate with this exact call in the debug log - the third
+		-- one pinpointed it precisely (log shows "entering target_tab" but
+		-- never "entered target_tab"). An earlier attempt deferred the
+		-- *return*-to-origin switch instead, which the same evidence later
+		-- showed was the wrong call. Not confirmed as the actual fix (not
+		-- reproducible in isolation), so still paired with logging.
+		vim.schedule(function()
+			log("entering target_tab")
+			vim.api.nvim_set_current_tabpage(target_tab)
+			log("entered target_tab")
 
-		local width = math.floor(vim.o.columns * 0.9)
+			local width = math.floor(vim.o.columns * 0.9)
 		local height = math.floor(vim.o.lines * 0.85)
 		local row = math.floor((vim.o.lines - height) / 2)
 		local col = math.floor((vim.o.columns - width) / 2)
@@ -548,6 +568,7 @@ function M.start_review(target_file, temp_content_file, status_file, alive_file)
 				{ title = "Claude Reviewer" }
 			)
 		end
+	end)
 	end)
 end
 
