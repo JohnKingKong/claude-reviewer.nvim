@@ -57,6 +57,22 @@ if [ -z "$SOCKET" ]; then
     if [ -f "$CWD_FILE" ]; then
       SOCKET=$(cat "$CWD_FILE")
       SOCKET_SOURCE="cwd file $CWD_FILE (CLAUDE_CWD=$CLAUDE_CWD)"
+    else
+      # write_socket_file() also registers under the tab's git root, to
+      # cover nvim being opened in a subdirectory. Mirror that here: Claude
+      # itself may be running from a subdirectory (e.g. a monorepo package)
+      # while the matching nvim tab is rooted at the repo root, so the exact
+      # cwd hash alone would never match even though a real socket exists.
+      GIT_ROOT=$(git -C "$CLAUDE_CWD" rev-parse --show-toplevel 2>/dev/null)
+      if [ -n "$GIT_ROOT" ] && [ "$GIT_ROOT" != "$CLAUDE_CWD" ]; then
+        GIT_ROOT_HASH=$(python3 -c "import hashlib, sys; print(hashlib.sha256(sys.argv[1].encode()).hexdigest()[:8])" "$GIT_ROOT" 2>/dev/null)
+        GIT_ROOT_FILE="/tmp/claude-nvim-cwd-${GIT_ROOT_HASH}.txt"
+        log "trying git-root match: GIT_ROOT=$GIT_ROOT hash=$GIT_ROOT_HASH file=$GIT_ROOT_FILE exists=$([ -f "$GIT_ROOT_FILE" ] && echo yes || echo no)"
+        if [ -f "$GIT_ROOT_FILE" ]; then
+          SOCKET=$(cat "$GIT_ROOT_FILE")
+          SOCKET_SOURCE="git-root file $GIT_ROOT_FILE (GIT_ROOT=$GIT_ROOT)"
+        fi
+      fi
     fi
   else
     log "no cwd in payload"
