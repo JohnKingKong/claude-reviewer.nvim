@@ -343,7 +343,9 @@ function M.start_review(target_file, temp_content_file, status_file, alive_file)
 		-- being edited, producing a redundant duplicate) - a float overlays
 		-- the tab without touching its layout at all, so there's nothing to
 		-- disturb and nothing to restore afterward.
+		log("entering target_tab")
 		vim.api.nvim_set_current_tabpage(target_tab)
+		log("entered target_tab")
 
 		local width = math.floor(vim.o.columns * 0.9)
 		local height = math.floor(vim.o.lines * 0.85)
@@ -379,11 +381,27 @@ function M.start_review(target_file, temp_content_file, status_file, alive_file)
 		vim.api.nvim_win_call(temp_win, function()
 			vim.cmd("diffthis")
 		end)
+		log("floats + diffthis built")
 
 		-- The diff is fully built; now decide whether to leave it focused or
-		-- hand focus back to wherever the user actually was.
+		-- hand focus back to wherever the user actually was. Deferred to its
+		-- own scheduled tick, separate from the float/diffthis setup above -
+		-- Neovim has crashed twice (confirmed via crash reports: SIGSEGV in
+		-- buf_copy_options, called from win_enter_ext/enter_tabpage/
+		-- nvim_set_current_tabpage) apparently while switching tabs in the
+		-- same tick as diffthis on freshly-created floating windows. This
+		-- gives Neovim's internal state a tick to settle first; not fully
+		-- confirmed as the fix (not reproducible in isolation), so it's
+		-- paired with logging either side to pinpoint the exact call if it
+		-- still happens.
 		if not same_workspace and vim.api.nvim_tabpage_is_valid(origin_tab) then
-			vim.api.nvim_set_current_tabpage(origin_tab)
+			vim.schedule(function()
+				log("returning to origin_tab")
+				if vim.api.nvim_tabpage_is_valid(origin_tab) then
+					vim.api.nvim_set_current_tabpage(origin_tab)
+				end
+				log("returned to origin_tab")
+			end)
 		end
 
 		local done = false
