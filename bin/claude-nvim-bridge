@@ -133,8 +133,8 @@ RPC_OUTPUT=$(nvim --server "$SOCKET" --remote-expr "luaeval(\"require('claude-re
 RPC_EXIT=$?
 log "RPC sent to $SOCKET, exit=$RPC_EXIT output=${RPC_OUTPUT:-<empty>}"
 
-# 7. Wait for the user to approve or deny in Neovim (timeout after 5 minutes)
-TIMEOUT=300
+# 7. Wait for the user to approve or deny in Neovim (timeout after 30 minutes)
+TIMEOUT=1800
 ELAPSED=0
 while [ ! -s "$STATUS_FILE" ]; do
   sleep 0.5

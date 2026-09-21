@@ -107,7 +107,7 @@ The plugin has three components:
 **`bin/claude-nvim-bridge`** — a bash script registered as a Claude Code `PermissionRequest` hook. On every `Edit`/`Write`:
 - Finds the right Neovim socket: the terminal Claude is running inside, then the CMUX workspace, then the cwd/git-root hash file
 - For `Edit` calls (which only carry an `old_string`/`new_string` fragment, not the full file) it reconstructs the full post-edit content so the diff shows complete before/after files
-- If a socket is found, sends an RPC to Neovim and waits for the decision (5-minute timeout)
+- If a socket is found, sends an RPC to Neovim and waits for the decision (30-minute timeout)
 - If not found, exits 0 so Claude Code shows its own UI. Neovim can also decline after being reached — the edit's directory doesn't match any currently open tab — in which case the bridge treats it exactly the same way
 - Creates an "alive" sentinel file that Neovim polls; the bridge process dying signals Neovim to close any open diff
 
