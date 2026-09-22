@@ -353,75 +353,84 @@ function M.start_review(target_file, temp_content_file, status_file, alive_file)
 		-- the tab without touching its layout at all, so there's nothing to
 		-- disturb and nothing to restore afterward.
 		--
-		-- Deferred to its own scheduled tick: three crashes today (confirmed
-		-- via crash reports, all identical: SIGSEGV in buf_copy_options,
+		-- Built via nvim_win_call anchored on an existing window in
+		-- target_tab, NOT nvim_set_current_tabpage. Three confirmed crashes
+		-- (via crash reports, all identical: SIGSEGV in buf_copy_options,
 		-- called from win_enter_ext/enter_tabpage/nvim_set_current_tabpage)
-		-- all correlate with this exact call in the debug log - the third
-		-- one pinpointed it precisely (log shows "entering target_tab" but
-		-- never "entered target_tab"). An earlier attempt deferred the
-		-- *return*-to-origin switch instead, which the same evidence later
-		-- showed was the wrong call. Not confirmed as the actual fix (not
-		-- reproducible in isolation), so still paired with logging.
-		vim.schedule(function()
-			log("entering target_tab")
-			vim.api.nvim_set_current_tabpage(target_tab)
-			log("entered target_tab")
+		-- all correlated with switching the *global* current tabpage right
+		-- before creating floats on it - two different Lua-level mitigations
+		-- (deferring the return-to-origin switch, then deferring the
+		-- forward switch) both failed to eliminate it, since a segfault in
+		-- Neovim's own C code isn't something pcall/vim.schedule can guard
+		-- against. nvim_win_call runs code with a target window's tab as
+		-- context WITHOUT touching the global current tabpage at all
+		-- (verified directly: nvim_open_win(..., relative="editor", ...)
+		-- inside it creates the float in that window's tab, while
+		-- nvim_get_current_tabpage() stays whatever it already was
+		-- throughout) - so this avoids the exact enter_tabpage code path
+		-- that was crashing, and there is no "return to origin" step needed
+		-- since the origin tab is never left in the first place.
+		local anchor_win = vim.api.nvim_tabpage_list_wins(target_tab)[1]
+		if not anchor_win then
+			log("target_tab has no windows, declining (status=3)")
+			local f = io.open(status_file, "w")
+			if f then
+				f:write("3")
+				f:close()
+			end
+			return
+		end
 
-			local width = math.floor(vim.o.columns * 0.9)
+		local width = math.floor(vim.o.columns * 0.9)
 		local height = math.floor(vim.o.lines * 0.85)
 		local row = math.floor((vim.o.lines - height) / 2)
 		local col = math.floor((vim.o.columns - width) / 2)
 		local left_width = math.floor((width - 1) / 2)
 		local right_width = width - left_width - 1
 
-		local orig_buf = open_file_buf(abs_target)
-		local orig_win = vim.api.nvim_open_win(orig_buf, true, {
-			relative = "editor",
-			row = row,
-			col = col,
-			width = left_width,
-			height = height,
-			border = "rounded",
-			title = " " .. vim.fn.fnamemodify(abs_target, ":t") .. " (current) ",
-		})
-		vim.api.nvim_win_call(orig_win, function()
-			vim.cmd("diffthis")
-		end)
-
-		local temp_buf = open_file_buf(temp_content_file)
-		local temp_win = vim.api.nvim_open_win(temp_buf, true, {
-			relative = "editor",
-			row = row,
-			col = col + left_width + 1,
-			width = right_width,
-			height = height,
-			border = "rounded",
-			title = " Claude's proposal ",
-		})
-		vim.api.nvim_win_call(temp_win, function()
-			vim.cmd("diffthis")
-		end)
-		log("floats + diffthis built")
-
-		-- The diff is fully built; now decide whether to leave it focused or
-		-- hand focus back to wherever the user actually was. Deferred to its
-		-- own scheduled tick, separate from the float/diffthis setup above -
-		-- Neovim has crashed twice (confirmed via crash reports: SIGSEGV in
-		-- buf_copy_options, called from win_enter_ext/enter_tabpage/
-		-- nvim_set_current_tabpage) apparently while switching tabs in the
-		-- same tick as diffthis on freshly-created floating windows. This
-		-- gives Neovim's internal state a tick to settle first; not fully
-		-- confirmed as the fix (not reproducible in isolation), so it's
-		-- paired with logging either side to pinpoint the exact call if it
-		-- still happens.
-		if not same_workspace and vim.api.nvim_tabpage_is_valid(origin_tab) then
-			vim.schedule(function()
-				log("returning to origin_tab")
-				if vim.api.nvim_tabpage_is_valid(origin_tab) then
-					vim.api.nvim_set_current_tabpage(origin_tab)
-				end
-				log("returned to origin_tab")
+		local orig_buf, orig_win, temp_buf, temp_win
+		vim.api.nvim_win_call(anchor_win, function()
+			orig_buf = open_file_buf(abs_target)
+			orig_win = vim.api.nvim_open_win(orig_buf, true, {
+				relative = "editor",
+				row = row,
+				col = col,
+				width = left_width,
+				height = height,
+				border = "rounded",
+				title = " " .. vim.fn.fnamemodify(abs_target, ":t") .. " (current) ",
+			})
+			vim.api.nvim_win_call(orig_win, function()
+				vim.cmd("diffthis")
 			end)
+
+			temp_buf = open_file_buf(temp_content_file)
+			temp_win = vim.api.nvim_open_win(temp_buf, true, {
+				relative = "editor",
+				row = row,
+				col = col + left_width + 1,
+				width = right_width,
+				height = height,
+				border = "rounded",
+				title = " Claude's proposal ",
+			})
+			vim.api.nvim_win_call(temp_win, function()
+				vim.cmd("diffthis")
+			end)
+		end)
+		log("floats + diffthis built, current tab untouched")
+
+		-- nvim_win_call restores the window that was current before it ran,
+		-- not just the tab - so in the same-workspace case the user's cursor
+		-- would otherwise land back wherever it was before review started,
+		-- not in the diff it just opened. Focus the proposal pane explicitly,
+		-- but only via nvim_set_current_win (a plain within-tab focus change,
+		-- unrelated to the tabpage-switching code that was crashing) and
+		-- only when we're already in target_tab - for a cross-workspace
+		-- review the whole point is to leave the user's focus alone; they
+		-- navigate to target_tab themselves when ready.
+		if same_workspace then
+			vim.api.nvim_set_current_win(temp_win)
 		end
 
 		local done = false
@@ -568,7 +577,6 @@ function M.start_review(target_file, temp_content_file, status_file, alive_file)
 				{ title = "Claude Reviewer" }
 			)
 		end
-	end)
 	end)
 end
 
