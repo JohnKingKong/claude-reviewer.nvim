@@ -7,6 +7,32 @@ M.config = {
 	},
 }
 
+-- Per-window approve/deny callbacks for whichever review is showing its
+-- clickable winbar buttons in that window, keyed by window id (both
+-- orig_win and temp_win of a given review point at the same pair, so
+-- either pane's buttons work symmetrically -- matching the existing
+-- buffer-local keymaps below, which are also bound to both buffers).
+-- Clicking a window always focuses it first (standard Neovim behavior),
+-- so resolving "which review" via vim.api.nvim_get_current_win() at click
+-- time -- rather than encoding a review id in the click syntax itself --
+-- is correct even with multiple concurrent reviews open in different tabs.
+M._reviews = M._reviews or {}
+
+local WINBAR = "  %1@v:lua.require'claude-reviewer'.click@ ✅ Approve %X  "
+	.. "%2@v:lua.require'claude-reviewer'.click@ ❌ Reject %X"
+
+function M.click(id)
+	local review = M._reviews[vim.api.nvim_get_current_win()]
+	if not review then
+		return
+	end
+	if id == 1 then
+		review.approve()
+	elseif id == 2 then
+		review.deny()
+	end
+end
+
 -- Shared with bin/claude-nvim-bridge's own log() so a single review attempt
 -- can be traced end-to-end across the bash and Lua sides.
 local function log(msg)
@@ -313,6 +339,26 @@ function M.reload_buffer(file_path)
 	vim.api.nvim_set_option_value("modified", false, { buf = bufnr })
 end
 
+-- Floating windows default to zindex 50 when unspecified (confirmed
+-- directly against a real nvim_open_win() call), the same tier most other
+-- plugins' floats use (e.g. snacks.nvim's lazygit terminal). A review is a
+-- blocking, must-see-to-proceed interaction, so it needs to reliably render
+-- above whatever else is already floating - not tie with it, which left
+-- one of the two diff panes hidden behind an equal-zindex window (e.g.
+-- lazygit) until manually focused. Computed fresh per review from whatever
+-- is actually on screen in this tab right now, rather than a fixed guess
+-- that some other tool's float could still exceed.
+local function next_zindex()
+	local max_zindex = 50
+	for _, win in ipairs(vim.api.nvim_list_wins()) do
+		local ok, config = pcall(vim.api.nvim_win_get_config, win)
+		if ok and config.zindex and config.zindex > max_zindex then
+			max_zindex = config.zindex
+		end
+	end
+	return max_zindex + 10
+end
+
 function M.start_review(target_file, temp_content_file, status_file, alive_file)
 	log(string.format("start_review called: target_file=%s status_file=%s", target_file, status_file))
 	vim.schedule(function()
@@ -388,6 +434,7 @@ function M.start_review(target_file, temp_content_file, status_file, alive_file)
 		local left_width = math.floor((width - 1) / 2)
 		local right_width = width - left_width - 1
 
+		local zindex = next_zindex()
 		local orig_buf, orig_win, temp_buf, temp_win
 		vim.api.nvim_win_call(anchor_win, function()
 			orig_buf = open_file_buf(abs_target)
@@ -399,10 +446,12 @@ function M.start_review(target_file, temp_content_file, status_file, alive_file)
 				height = height,
 				border = "rounded",
 				title = " " .. vim.fn.fnamemodify(abs_target, ":t") .. " (current) ",
+				zindex = zindex,
 			})
 			vim.api.nvim_win_call(orig_win, function()
 				vim.cmd("diffthis")
 			end)
+			vim.wo[orig_win].winbar = WINBAR
 
 			temp_buf = open_file_buf(temp_content_file)
 			temp_win = vim.api.nvim_open_win(temp_buf, true, {
@@ -413,10 +462,12 @@ function M.start_review(target_file, temp_content_file, status_file, alive_file)
 				height = height,
 				border = "rounded",
 				title = " Claude's proposal ",
+				zindex = zindex,
 			})
 			vim.api.nvim_win_call(temp_win, function()
 				vim.cmd("diffthis")
 			end)
+			vim.wo[temp_win].winbar = WINBAR
 		end)
 		log("floats + diffthis built, current tab untouched")
 
@@ -464,6 +515,8 @@ function M.start_review(target_file, temp_content_file, status_file, alive_file)
 			-- 1. CLEAN UP NVIM LAYOUT FIRST
 			-- Close both floating windows - the underlying tab layout was
 			-- never touched, so there's nothing else to restore.
+			M._reviews[orig_win] = nil
+			M._reviews[temp_win] = nil
 			if vim.api.nvim_win_is_valid(temp_win) then
 				pcall(vim.api.nvim_win_close, temp_win, true)
 			end
@@ -513,19 +566,27 @@ function M.start_review(target_file, temp_content_file, status_file, alive_file)
 			end, 300)
 		end
 
-		for _, buf in ipairs({ temp_buf, orig_buf }) do
-			vim.keymap.set("n", M.config.keymaps.approve, function()
-				if vim.api.nvim_get_current_tabpage() == target_tab then
-					finish_review(0, "Claude edit approved!", vim.log.levels.INFO)
-				end
-			end, { buffer = buf, desc = "Approve Claude Edit" })
-
-			vim.keymap.set("n", M.config.keymaps.deny, function()
-				if vim.api.nvim_get_current_tabpage() == target_tab then
-					finish_review(2, "Claude edit rejected.", vim.log.levels.WARN)
-				end
-			end, { buffer = buf, desc = "Deny Claude Edit" })
+		local function approve()
+			if vim.api.nvim_get_current_tabpage() == target_tab then
+				finish_review(0, "Claude edit approved!", vim.log.levels.INFO)
+			end
 		end
+		local function deny()
+			if vim.api.nvim_get_current_tabpage() == target_tab then
+				finish_review(2, "Claude edit rejected.", vim.log.levels.WARN)
+			end
+		end
+
+		for _, buf in ipairs({ temp_buf, orig_buf }) do
+			vim.keymap.set("n", M.config.keymaps.approve, approve, { buffer = buf, desc = "Approve Claude Edit" })
+			vim.keymap.set("n", M.config.keymaps.deny, deny, { buffer = buf, desc = "Deny Claude Edit" })
+		end
+
+		-- Same pair of callbacks, reachable from the clickable winbar buttons
+		-- on either pane (see M.click at the top of this file).
+		local review_actions = { approve = approve, deny = deny }
+		M._reviews[orig_win] = review_actions
+		M._reviews[temp_win] = review_actions
 
 		-- Close the diff if Claude Code decides before the user reviews in nvim.
 		-- Two signals: (1) bridge PID dies, (2) target file mtime changes because

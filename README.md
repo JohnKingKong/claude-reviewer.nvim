@@ -20,7 +20,7 @@ Running Claude Code in a separate terminal (tmux, CMUX, Alacritty) protects your
    - the CMUX workspace running that task
    - the current working directory (falling back to its git root)
 3. Neovim opens the diff as a pair of floating windows overlaying the existing tab whose own directory covers the edited file — never a new tab of its own (so a workspace-per-tab setup, e.g. floo-network.nvim, never grows a phantom extra workspace) and never a split carved out of whatever else is in that tab (another file, the startup dashboard, anything — floats don't touch the tab's layout at all). If that tab isn't the one you're currently viewing, the floats are built in the background instead of stealing your focus, and a notification tells you which workspace it's waiting in.
-4. You approve with `<leader>ca` or deny with `<leader>cd`.
+4. You approve with `<leader>ca` (or clicking the ✅ Approve button in either pane's winbar) or deny with `<leader>cd` (or ❌ Reject). The panes render above other floating windows (e.g. a lazygit terminal) rather than tying with them, so neither pane gets stuck hidden behind one.
 5. Claude Code receives the decision and proceeds (or stops).
 
 If you edit Claude's proposed content in the diff before approving, your edits are preserved: a `PostToolUse` hook (`claude-nvim-post-bridge`) overwrites the file Claude just wrote with your version.
