@@ -7,25 +7,39 @@
 # already open (and therefore reused rather than recreated) never notices
 # the on-disk change on its own.
 
+DEBUG_LOG="/tmp/claude-reviewer-debug.log"
+log() {
+  echo "$(date '+%Y-%m-%d %H:%M:%S') [post-bridge pid=$$] $1" >> "$DEBUG_LOG"
+}
+
 PAYLOAD=$(cat)
 TOOL_NAME=$(echo "$PAYLOAD" | python3 -c "import sys, json; print(json.load(sys.stdin).get('tool_name', ''))")
 FILE_PATH=$(echo "$PAYLOAD" | python3 -c "import sys, json; print(json.load(sys.stdin).get('tool_input', {}).get('file_path', ''))")
 FILE_PATH=$(realpath --canonicalize-missing "$FILE_PATH" 2>/dev/null || echo "$FILE_PATH")
 
+log "invoked: tool=$TOOL_NAME file=$FILE_PATH"
+
 if [[ "$TOOL_NAME" != "Edit" && "$TOOL_NAME" != "Write" ]]; then
+  log "not Edit/Write, exiting"
   exit 0
 fi
 
 if [ -z "$FILE_PATH" ]; then
+  log "empty FILE_PATH, exiting"
   exit 0
 fi
 
 HASH=$(python3 -c "import hashlib, sys; print(hashlib.sha256(sys.argv[1].encode()).hexdigest()[:8])" "$FILE_PATH")
 PENDING="/tmp/claude-nvim-pending-${HASH}.txt"
 
+log "hash=$HASH pending=$PENDING exists=$([ -f "$PENDING" ] && echo yes || echo no)"
+
 if [ -f "$PENDING" ]; then
   cp "$PENDING" "$FILE_PATH"
+  log "applied pending content to $FILE_PATH"
   rm -f "$PENDING"
+else
+  log "no pending side-channel for this hash -- nothing to apply"
 fi
 
 # Find the same Neovim instance the main bridge would have used (same
@@ -50,8 +64,11 @@ if [ -z "$SOCKET" ]; then
   fi
 fi
 
+log "resolved socket=${SOCKET:-<none>} is_valid_socket=$([ -S "$SOCKET" ] && echo yes || echo no)"
+
 if [ -n "$SOCKET" ] && [ -S "$SOCKET" ]; then
   nvim --server "$SOCKET" --remote-expr "luaeval(\"require('claude-reviewer').reload_buffer('$FILE_PATH')\")" >/dev/null 2>&1
+  log "reload_buffer RPC sent, exit=$?"
 fi
 
 exit 0

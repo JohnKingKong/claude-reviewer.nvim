@@ -495,7 +495,9 @@ function M.start_review(target_file, temp_content_file, status_file, alive_file)
 			-- If the user edited Claude's proposed content, save it to a side-channel
 			-- file keyed by the target path. The PostToolUse hook (claude-nvim-post-bridge)
 			-- will overwrite the file after Claude's write completes, without denying.
-			if exit_code == 0 and vim.api.nvim_get_option_value("modified", { buf = temp_buf }) then
+			local modified = exit_code == 0 and vim.api.nvim_get_option_value("modified", { buf = temp_buf })
+			log(string.format("finish_review: exit_code=%s abs_target=%s modified=%s", tostring(exit_code), abs_target, tostring(modified)))
+			if modified then
 				local hash = vim.fn.sha256(abs_target):sub(1, 8)
 				local side_channel = "/tmp/claude-nvim-pending-" .. hash .. ".txt"
 				local lines = vim.api.nvim_buf_get_lines(temp_buf, 0, -1, false)
@@ -509,6 +511,9 @@ function M.start_review(target_file, temp_content_file, status_file, alive_file)
 					fh:write(content)
 					fh:close()
 					notify_msg = "Claude edit accepted with your modifications!"
+					log(string.format("finish_review: wrote pending side-channel %s (%d bytes)", side_channel, #content))
+				else
+					log(string.format("finish_review: FAILED to open side-channel %s for writing", side_channel))
 				end
 			end
 
