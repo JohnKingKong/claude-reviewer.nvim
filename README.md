@@ -8,7 +8,7 @@ Running Claude Code inside a Neovim terminal toggle means accidentally closing N
 
 Running Claude Code in a separate terminal (tmux, CMUX, Alacritty) protects your session — but you lose visual diff review and Claude writes directly to disk.
 
-**`claude-reviewer.nvim` bridges this gap.** It hooks into Claude Code's permission system and pipes every proposed file edit back into your live Neovim session for explicit approval, with no external dependencies.
+**`claude-reviewer.nvim` bridges this gap.** It hooks into Claude Code before every edit and pipes the proposed change back into your live Neovim session for explicit approval. It works from any terminal, with no Neovim plugin dependencies.
 
 ---
 
@@ -32,6 +32,13 @@ If you edit Claude's proposed content in the diff before approving, your edits a
 **While a diff is open, Claude Code waits for you** and shows no prompt of its own. To cancel from the Claude side, press `Esc` in Claude Code: the hook is stopped, the edit doesn't happen, and the diff in Neovim closes on its own.
 
 ---
+
+## Requirements
+
+- Neovim 0.10+
+- Claude Code with hooks support (`PreToolUse` / `PostToolUse`)
+- `python3` on your `PATH` (used by the hook scripts to read Claude Code's JSON payload)
+- macOS or Linux
 
 ## Installation
 
@@ -102,9 +109,30 @@ require('claude-reviewer').setup({
 
 ---
 
+## Upgrading from an earlier version
+
+Versions before the move to `PreToolUse` registered the review as a `PermissionRequest` hook. That could be approved out from under an open diff by anything else answering the same permission request (Claude Code's own prompt, or a terminal integration such as cmux), so edits sometimes went through while the review was still open in Neovim.
+
+`setup()` migrates `~/.claude/settings.json` for you: it removes the old `PermissionRequest` entry and registers the `PreToolUse` one. After updating:
+
+1. Restart Neovim, so `setup()` runs and rewrites the hooks.
+2. Restart your Claude Code sessions, so they pick up the new hook.
+
+---
+
+## Troubleshooting
+
+Both hook scripts and the Neovim side log every step to `/tmp/claude-reviewer-debug.log`, so a single edit can be traced end to end.
+
+- **`no live Neovim found`**: no running Neovim has a tab whose directory (or git root) contains the edited file or Claude's working directory. Open the project as a tab, or make sure the plugin loads at startup (`lazy = false`).
+- **The diff never opens but Claude Code prompts instead**: same cause. Without a matching Neovim tab, Claude Code's own permission flow takes over on purpose.
+- **The diff opens in a tab you're not looking at**: reviews open in the tab whose directory covers the file, without stealing focus. A notification names the tab it's waiting in.
+
+---
+
 ## Architecture
 
-The plugin has three components:
+The plugin has four components:
 
 **`bin/claude-nvim-bridge`** — a bash script registered as a Claude Code `PreToolUse` hook (with a 30-minute timeout). On every `Edit`/`Write`:
 - Finds the right Neovim socket (shared with the post-bridge via `bin/claude-nvim-lib.sh`): the terminal Claude is running inside, then the CMUX workspace, then the nearest registered directory walking up from the edited file and Claude's cwd
@@ -115,6 +143,8 @@ The plugin has three components:
 - Creates an "alive" sentinel file that Neovim polls; the bridge process dying signals Neovim to close any open diff
 
 **`bin/claude-nvim-post-bridge`** — a bash script registered as a Claude Code `PostToolUse` hook, running after Claude's write actually completes. If you edited Claude's proposed content during review, this overwrites the file Claude just wrote with your version. Either way, it also reloads any open Neovim buffer for that file — Neovim has no way to notice the on-disk change on its own, since the write happens entirely outside its event loop.
+
+**`bin/claude-nvim-lib.sh`** — shared by both hook scripts (sourced, not registered as a hook): logging, payload parsing, and the Neovim socket lookup, so the post-bridge always reaches the same Neovim that showed the review.
 
 **`lua/claude-reviewer/init.lua`** — the Neovim plugin:
 - Writes a socket file for every open tab's own local directory (keyed by cwd hash, git root, and CMUX workspace id), not just the current one — a workspace-per-tab setup (e.g. floo-network.nvim) can have several tabs with different directories, so a single "current" snapshot would miss all but one. Registration is deferred with `vim.schedule()` so it runs after any other plugin's own startup has finished setting up its tabs, and stays fresh on `DirChanged`.
