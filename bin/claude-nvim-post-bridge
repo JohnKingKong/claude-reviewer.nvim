@@ -7,68 +7,39 @@
 # already open (and therefore reused rather than recreated) never notices
 # the on-disk change on its own.
 
-DEBUG_LOG="/tmp/claude-reviewer-debug.log"
-log() {
-  echo "$(date '+%Y-%m-%d %H:%M:%S') [post-bridge pid=$$] $1" >> "$DEBUG_LOG"
-}
+LOG_TAG="post-bridge"
+# shellcheck source=claude-nvim-lib.sh
+source "$(dirname "$0")/claude-nvim-lib.sh"
 
 PAYLOAD=$(cat)
-TOOL_NAME=$(echo "$PAYLOAD" | python3 -c "import sys, json; print(json.load(sys.stdin).get('tool_name', ''))")
-FILE_PATH=$(echo "$PAYLOAD" | python3 -c "import sys, json; print(json.load(sys.stdin).get('tool_input', {}).get('file_path', ''))")
-FILE_PATH=$(realpath --canonicalize-missing "$FILE_PATH" 2>/dev/null || echo "$FILE_PATH")
+TOOL_NAME=$(payload_get "d.get('tool_name')")
+RAW_FILE_PATH=$(payload_get "d.get('tool_input', {}).get('file_path')")
+CLAUDE_CWD=$(payload_get "d.get('cwd')")
+[ -n "$RAW_FILE_PATH" ] && FILE_PATH=$(abs_path "$RAW_FILE_PATH")
 
 log "invoked: tool=$TOOL_NAME file=$FILE_PATH"
 
-if [[ "$TOOL_NAME" != "Edit" && "$TOOL_NAME" != "Write" ]]; then
-  log "not Edit/Write, exiting"
-  exit 0
-fi
-
-if [ -z "$FILE_PATH" ]; then
-  log "empty FILE_PATH, exiting"
+if [[ "$TOOL_NAME" != "Edit" && "$TOOL_NAME" != "Write" ]] || [ -z "$FILE_PATH" ]; then
+  log "not an Edit/Write with a file_path, exiting"
   exit 0
 fi
 
 HASH=$(python3 -c "import hashlib, sys; print(hashlib.sha256(sys.argv[1].encode()).hexdigest()[:8])" "$FILE_PATH")
 PENDING="/tmp/claude-nvim-pending-${HASH}.txt"
 
-log "hash=$HASH pending=$PENDING exists=$([ -f "$PENDING" ] && echo yes || echo no)"
-
 if [ -f "$PENDING" ]; then
   cp "$PENDING" "$FILE_PATH"
-  log "applied pending content to $FILE_PATH"
   rm -f "$PENDING"
-else
-  log "no pending side-channel for this hash -- nothing to apply"
+  log "applied your in-review modifications from $PENDING"
 fi
 
-# Find the same Neovim instance the main bridge would have used (same
-# priority order), to reload any open buffer for this file now that the
-# write is actually done.
-SOCKET=""
-if [ -n "$NVIM_LISTEN_ADDRESS" ]; then
-  SOCKET="$NVIM_LISTEN_ADDRESS"
-elif [ -n "$NVIM" ]; then
-  SOCKET="$NVIM"
-fi
-if [ -z "$SOCKET" ] && [ -n "$CMUX_WORKSPACE_ID" ]; then
-  CMUX_FILE="/tmp/claude-nvim-cmux-${CMUX_WORKSPACE_ID}.txt"
-  [ -f "$CMUX_FILE" ] && SOCKET=$(cat "$CMUX_FILE")
-fi
-if [ -z "$SOCKET" ]; then
-  CLAUDE_CWD=$(echo "$PAYLOAD" | python3 -c "import sys, json; print(json.load(sys.stdin).get('cwd', ''))" 2>/dev/null)
-  if [ -n "$CLAUDE_CWD" ]; then
-    CWD_HASH=$(python3 -c "import hashlib, sys; print(hashlib.sha256(sys.argv[1].encode()).hexdigest()[:8])" "$CLAUDE_CWD" 2>/dev/null)
-    CWD_FILE="/tmp/claude-nvim-cwd-${CWD_HASH}.txt"
-    [ -f "$CWD_FILE" ] && SOCKET=$(cat "$CWD_FILE")
-  fi
-fi
-
-log "resolved socket=${SOCKET:-<none>} is_valid_socket=$([ -S "$SOCKET" ] && echo yes || echo no)"
-
-if [ -n "$SOCKET" ] && [ -S "$SOCKET" ]; then
+# Same lookup as the main bridge, so the reload reaches the Neovim that
+# showed the review.
+if find_nvim_socket "$FILE_PATH" "$CLAUDE_CWD"; then
   nvim --server "$SOCKET" --remote-expr "luaeval(\"require('claude-reviewer').reload_buffer('$FILE_PATH')\")" >/dev/null 2>&1
-  log "reload_buffer RPC sent, exit=$?"
+  log "reload_buffer RPC sent via $SOCKET_SOURCE, exit=$?"
+else
+  log "no live Neovim found, nothing to reload"
 fi
 
 exit 0

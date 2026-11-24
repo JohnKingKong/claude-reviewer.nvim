@@ -14,11 +14,13 @@ Running Claude Code in a separate terminal (tmux, CMUX, Alacritty) protects your
 
 ## How it works
 
-1. Claude Code fires a `PermissionRequest` hook before every `Edit` or `Write`.
+1. Claude Code fires a `PreToolUse` hook before every `Edit` or `Write`. The edit can't happen until the hook answers, and Claude Code hasn't shown any permission prompt yet, so nothing else can approve the edit while the diff is open: not Claude Code's own prompt, and not a terminal integration's own permission hook (cmux, for example, injects one into every session it launches).
 2. The hook script (`claude-nvim-bridge`) finds the right Neovim instance, in priority order:
    - the Neovim terminal Claude is running inside (if any)
-   - the CMUX workspace running that task
-   - the current working directory (falling back to its git root)
+   - the CMUX workspace running that task (when running inside CMUX)
+   - the nearest directory, walking up from the edited file and then from Claude's working directory, that a running Neovim has open as a tab (or that tab's git root). Registrations left behind by a crashed Neovim are skipped.
+
+   None of these depend on the terminal, so this works the same in any terminal: Ghostty, iTerm2, Alacritty, WezTerm, kitty, tmux, CMUX, or the macOS Terminal.
 3. Neovim opens the diff as a pair of floating windows overlaying the existing tab whose own directory covers the edited file — never a new tab of its own (so a workspace-per-tab setup, e.g. floo-network.nvim, never grows a phantom extra workspace) and never a split carved out of whatever else is in that tab (another file, the startup dashboard, anything — floats don't touch the tab's layout at all). If that tab isn't the one you're currently viewing, the floats are built in the background instead of stealing your focus, and a notification tells you which workspace it's waiting in.
 4. You approve with `<leader>ca` (or clicking the ✅ Approve button in either pane's winbar) or deny with `<leader>cd` (or ❌ Reject). The panes render above other floating windows (e.g. a lazygit terminal) rather than tying with them, so neither pane gets stuck hidden behind one.
 5. Claude Code receives the decision and proceeds (or stops).
@@ -27,7 +29,7 @@ If you edit Claude's proposed content in the diff before approving, your edits a
 
 **If no Neovim is open for the workspace, *or* the edit is for a directory that isn't currently open as a tab in it**, the bridge exits cleanly and Claude Code falls back to its own built-in permission UI — no hanging, no auto-deny, and no tab gets created for a workspace that doesn't exist yet.
 
-**If you approve or deny in Claude Code's own UI while the diff is still open in Neovim**, the diff closes automatically and reports the outcome accordingly (approved vs. cancelled).
+**While a diff is open, Claude Code waits for you** and shows no prompt of its own. To cancel from the Claude side, press `Esc` in Claude Code: the hook is stopped, the edit doesn't happen, and the diff in Neovim closes on its own.
 
 ---
 
@@ -104,8 +106,9 @@ require('claude-reviewer').setup({
 
 The plugin has three components:
 
-**`bin/claude-nvim-bridge`** — a bash script registered as a Claude Code `PermissionRequest` hook. On every `Edit`/`Write`:
-- Finds the right Neovim socket: the terminal Claude is running inside, then the CMUX workspace, then the cwd/git-root hash file
+**`bin/claude-nvim-bridge`** — a bash script registered as a Claude Code `PreToolUse` hook (with a 30-minute timeout). On every `Edit`/`Write`:
+- Finds the right Neovim socket (shared with the post-bridge via `bin/claude-nvim-lib.sh`): the terminal Claude is running inside, then the CMUX workspace, then the nearest registered directory walking up from the edited file and Claude's cwd
+- Answers with `permissionDecision: "allow"` or `"deny"`, so an approved edit goes through without a second prompt in Claude Code
 - For `Edit` calls (which only carry an `old_string`/`new_string` fragment, not the full file) it reconstructs the full post-edit content so the diff shows complete before/after files
 - If a socket is found, sends an RPC to Neovim and waits for the decision (30-minute timeout)
 - If not found, exits 0 so Claude Code shows its own UI. Neovim can also decline after being reached — the edit's directory doesn't match any currently open tab — in which case the bridge treats it exactly the same way
@@ -116,7 +119,7 @@ The plugin has three components:
 **`lua/claude-reviewer/init.lua`** — the Neovim plugin:
 - Writes a socket file for every open tab's own local directory (keyed by cwd hash, git root, and CMUX workspace id), not just the current one — a workspace-per-tab setup (e.g. floo-network.nvim) can have several tabs with different directories, so a single "current" snapshot would miss all but one. Registration is deferred with `vim.schedule()` so it runs after any other plugin's own startup has finished setting up its tabs, and stays fresh on `DirChanged`.
 - Cleans up its socket files on exit
-- Exposes `start_review()` as an RPC entry point: finds the open tab whose own directory covers the edited file and builds the diff there as a pair of floating windows (in the background, without stealing focus, if it isn't the tab you're currently viewing) — declining entirely, with no tab created, if no open tab matches. Sets up the approve/deny keymaps, and polls the bridge's liveness and the target file's mtime to detect a decision made from Claude's own UI.
+- Exposes `start_review()` as an RPC entry point: finds the open tab whose own directory covers the edited file and builds the diff there as a pair of floating windows (in the background, without stealing focus, if it isn't the tab you're currently viewing) — declining entirely, with no tab created, if no open tab matches. Sets up the approve/deny keymaps, and polls the bridge's liveness so the diff closes if Claude Code cancels the hook.
 - Exposes `reload_buffer()` as a second RPC entry point, called by `claude-nvim-post-bridge` once Claude's write actually completes, to refresh any buffer for that file that was already open (and therefore left alive) — skipping it if it has unsaved local changes.
 
 The hook and settings injection into `~/.claude/settings.json` happen automatically on `setup()`.

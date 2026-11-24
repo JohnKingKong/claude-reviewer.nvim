@@ -169,78 +169,62 @@ function M.setup(opts)
 		end
 	end
 
-	-- Initialize required JSON structure if empty
 	settings.hooks = settings.hooks or {}
-	settings.hooks.PermissionRequest = settings.hooks.PermissionRequest or {}
 
-	-- Remove any stale bridge entries left in PreToolUse from older versions
-	if settings.hooks.PreToolUse then
-		local cleaned = {}
-		for _, item in ipairs(settings.hooks.PreToolUse) do
-			local has_bridge = false
+	-- Drops every entry whose hooks run a command matching `pattern` from
+	-- `event`, removing the event key entirely if nothing else is left.
+	local function remove_hook(event, pattern)
+		local entries = settings.hooks[event]
+		if not entries then
+			return
+		end
+		local kept = {}
+		for _, item in ipairs(entries) do
+			local ours = false
 			for _, hook in ipairs(item.hooks or {}) do
-				if hook.command and hook.command:match("claude%-nvim%-bridge") then
-					has_bridge = true
+				if hook.command and hook.command:match(pattern) then
+					ours = true
 					break
 				end
 			end
-			if not has_bridge then
-				table.insert(cleaned, item)
+			if not ours then
+				table.insert(kept, item)
 			end
 		end
-		settings.hooks.PreToolUse = cleaned
+		settings.hooks[event] = #kept > 0 and kept or nil
 	end
 
-	-- Check if the bridge hook is already registered
-	local exists = false
-	for _, item in ipairs(settings.hooks.PermissionRequest) do
-		if item.hooks then
-			for _, hook in ipairs(item.hooks) do
-				if hook.command and hook.command:match("claude%-nvim%-bridge") then
-					hook.command = bridge_path -- Always ensure the path is up to date
-					exists = true
+	-- Registers (or refreshes the path/timeout of) our Edit|Write hook.
+	local function ensure_hook(event, pattern, command, timeout)
+		settings.hooks[event] = settings.hooks[event] or {}
+		for _, item in ipairs(settings.hooks[event]) do
+			for _, hook in ipairs(item.hooks or {}) do
+				if hook.command and hook.command:match(pattern) then
+					hook.command = command
+					hook.timeout = timeout
+					return
 				end
 			end
 		end
-	end
-
-	-- Inject the hook if it is missing
-	if not exists then
-		table.insert(settings.hooks.PermissionRequest, {
+		table.insert(settings.hooks[event], {
 			matcher = "Edit|Write",
-			hooks = {
-				{
-					type = "command",
-					command = bridge_path,
-				},
-			},
+			hooks = { { type = "command", command = command, timeout = timeout } },
 		})
 	end
 
-	-- Register the PostToolUse hook that applies user-modified content after Claude writes
-	settings.hooks.PostToolUse = settings.hooks.PostToolUse or {}
-	local post_exists = false
-	for _, item in ipairs(settings.hooks.PostToolUse) do
-		if item.hooks then
-			for _, hook in ipairs(item.hooks) do
-				if hook.command and hook.command:match("claude%-nvim%-post%-bridge") then
-					hook.command = post_bridge_path
-					post_exists = true
-				end
-			end
-		end
-	end
-	if not post_exists then
-		table.insert(settings.hooks.PostToolUse, {
-			matcher = "Edit|Write",
-			hooks = {
-				{
-					type = "command",
-					command = post_bridge_path,
-				},
-			},
-		})
-	end
+	-- The review runs as a PreToolUse hook. Unlike PermissionRequest, the
+	-- edit cannot happen until it returns and no permission UI exists yet,
+	-- so nothing else can approve the edit out from under the open diff:
+	-- not Claude Code's own prompt, and not a terminal's own
+	-- PermissionRequest hook (cmux injects one into every session it
+	-- launches). That's what makes the review terminal-agnostic. Older
+	-- versions registered it under PermissionRequest; migrate those.
+	-- Timeout (seconds) matches the bridge's own 30-minute wait.
+	remove_hook("PermissionRequest", "claude%-nvim%-bridge")
+	ensure_hook("PreToolUse", "claude%-nvim%-bridge", bridge_path, 1800)
+
+	-- Applies user-modified content and reloads buffers after Claude writes.
+	ensure_hook("PostToolUse", "claude%-nvim%-post%-bridge", post_bridge_path, 30)
 
 	vim.fn.mkdir(vim.fn.expand("~/.claude"), "p")
 	local f = io.open(settings_path, "w")
@@ -593,11 +577,11 @@ function M.start_review(target_file, temp_content_file, status_file, alive_file)
 		M._reviews[orig_win] = review_actions
 		M._reviews[temp_win] = review_actions
 
-		-- Close the diff if Claude Code decides before the user reviews in nvim.
-		-- Two signals: (1) bridge PID dies, (2) target file mtime changes because
-		-- Claude Code accepted via its own UI and wrote the file while the bridge
-		-- was still running (orphaned subprocess).
-		local initial_mtime = vim.fn.getftime(target_file)
+		-- Close the diff if the bridge goes away before a decision: Claude Code
+		-- killed the hook (Esc / interrupt in Claude) or it exited some other
+		-- way. As a blocking PreToolUse hook, nothing can write the file while
+		-- the bridge is still alive, so its liveness is the only signal needed
+		-- (an mtime check would also misfire if you :w the file mid-review).
 		local timer = vim.uv.new_timer()
 		timer:start(
 			500,
@@ -611,15 +595,10 @@ function M.start_review(target_file, temp_content_file, status_file, alive_file)
 				local lines = vim.fn.filereadable(alive_file) == 1 and vim.fn.readfile(alive_file) or {}
 				local pid = tonumber(lines[1])
 				local bridge_alive = pid ~= nil and pcall(vim.uv.kill, pid, 0)
-				local file_changed = vim.fn.getftime(target_file) ~= initial_mtime
-				if not bridge_alive or file_changed then
+				if not bridge_alive then
 					timer:stop()
 					timer:close()
-					if file_changed then
-						finish_review(nil, "Claude edit approved!", vim.log.levels.INFO)
-					else
-						finish_review(nil, "Claude review cancelled.", vim.log.levels.WARN)
-					end
+					finish_review(nil, "Claude review cancelled.", vim.log.levels.WARN)
 				end
 			end)
 		)
